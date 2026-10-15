@@ -19,6 +19,10 @@ Environment variables (all optional locally, REQUIRED in production):
 
 SECURITY notes:
     * Only image MIME types are accepted; anything else raises StorageError.
+      Clients that send `application/octet-stream` / no content type (common
+      on Android + web) get their real type recovered from magic bytes first,
+      then from the filename extension - only genuinely non-image payloads
+      are rejected.
     * Uploads are capped at MAX_UPLOAD_BYTES (5 MB) before any write happens.
     * Local filenames are random UUIDs - user-controlled names never touch
       the filesystem (no path traversal).
@@ -51,7 +55,34 @@ _CONTENT_TYPE_EXTENSIONS: dict[str, str] = {
     "image/png": "png",
     "image/webp": "webp",
     "image/gif": "gif",
+    "image/heic": "heic",
 }
+
+# Filename extension -> MIME type, used when the client cannot tell us what
+# it uploaded (application/octet-stream, missing content type, Android's
+# image_picker on some devices, web blobs, ...).
+_EXTENSION_MIME_TYPES: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".heic": "image/heic",
+    ".heif": "image/heic",
+}
+
+# Leading-byte signatures checked BEFORE the filename extension, because a
+# client can mislabel a file far more easily than it can rewrite its bytes.
+_MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),          # JPEG / JPEG-EXIF / JPEG-2000 SOI
+    (b"\x89PNG\r\n\x1a\n", "image/png"),      # PNG
+    (b"GIF87a", "image/gif"),                 # GIF87a
+    (b"GIF89a", "image/gif"),                 # GIF89a
+)
+
+_WEBP_RIFF_PREFIX = b"RIFF"
+_WEBP_TYPE_OFFSET = 8   # bytes 0-3 "RIFF", 4-7 size, 8-11 "WEBP"
+_WEBP_TYPE = b"WEBP"
 
 
 class StorageError(Exception):
@@ -71,14 +102,47 @@ def _cloudinary_configured() -> bool:
     )
 
 
-def _validated_image_bytes(file: UploadFile) -> tuple[bytes, str]:
-    """Read and validate the upload; returns (bytes, extension)."""
-    content_type = (file.content_type or "").split(";")[0].strip().lower()
-    if content_type not in _CONTENT_TYPE_EXTENSIONS:
-        raise StorageError(
-            f"Unsupported file type '{content_type or 'unknown'}'. "
-            "Upload a JPEG, PNG, WebP, or GIF image."
-        )
+def sniff_image_mime(data: bytes, filename: str | None = None) -> str | None:
+    """Recover the real image MIME type for an ambiguous upload.
+
+    Android's `image_picker` and browser blob plumbing frequently hand the
+    backend `application/octet-stream` (or nothing at all) even though the
+    bytes are a perfectly good photo. Rejecting those 400s would break the
+    Sell flow on physical devices, so instead we identify the payload:
+
+        1. Magic bytes: JPEG ``\\xff\\xd8\\xff``, PNG ``\\x89PNG``, GIF ``GIF8``,
+           WebP ``RIFF....WEBP`` - authoritative, cannot be faked by a name.
+        2. Filename extension: ``.jpg``/``.jpeg``/``.png``/``.webp``/``.gif``/
+           ``.heic`` - the fallback when the bytes are too short to classify.
+
+    Returns a content type that passes the allow-list, or None when the
+    payload is not a recognised image (caller rejects with HTTP 400).
+    """
+    if data:
+        for magic, mime in _MAGIC_SIGNATURES:
+            if data.startswith(magic):
+                return mime
+        # WebP is RIFF-based, so the container and the format tag are split.
+        if (
+            len(data) >= _WEBP_TYPE_OFFSET + 4
+            and data.startswith(_WEBP_RIFF_PREFIX)
+            and data[_WEBP_TYPE_OFFSET:_WEBP_TYPE_OFFSET + 4] == _WEBP_TYPE
+        ):
+            return "image/webp"
+
+    suffix = Path(filename or "").suffix.lower()
+    return _EXTENSION_MIME_TYPES.get(suffix)
+
+
+def _validated_image_bytes(file: UploadFile) -> tuple[bytes, str, str]:
+    """Read and validate the upload; returns (bytes, mime_type, extension).
+
+    A content type outside the image allow-list (including the empty string
+    and ``application/octet-stream``) is not fatal on its own - it triggers
+    magic-byte/extension sniffing first, and only a payload that still looks
+    non-image is rejected.
+    """
+    declared = (file.content_type or "").split(";")[0].strip().lower()
 
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) == 0:
@@ -88,7 +152,17 @@ def _validated_image_bytes(file: UploadFile) -> tuple[bytes, str]:
             f"Image exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit. "
             "Please resize and try again."
         )
-    return data, _CONTENT_TYPE_EXTENSIONS[content_type]
+
+    content_type = declared if declared in _CONTENT_TYPE_EXTENSIONS else None
+    if content_type is None:
+        content_type = sniff_image_mime(data, file.filename)
+    if content_type is None or content_type not in _CONTENT_TYPE_EXTENSIONS:
+        raise StorageError(
+            f"Unsupported file type '{declared or 'unknown'}'. "
+            "Upload a JPEG, PNG, WebP, GIF, or HEIC image."
+        )
+
+    return data, content_type, _CONTENT_TYPE_EXTENSIONS[content_type]
 
 
 def _upload_to_cloudinary(data: bytes, content_type: str) -> str:
@@ -126,29 +200,33 @@ def _upload_to_local(data: bytes, extension: str) -> str:
     return f"/uploads/{filename}"
 
 
-def save_upload(file: UploadFile, base_url: str) -> str:
-    """Validate + store one listing photo; return an absolute image URL.
+def save_upload(file: UploadFile, base_url: str) -> tuple[str, str]:
+    """Validate + store one listing photo; return (absolute URL, MIME type).
 
     Args:
         file:        The uploaded multipart file (UploadFile from FastAPI).
+                     Ambiguous content types (application/octet-stream / None)
+                     are recovered from magic bytes or the filename extension.
         base_url:    Scheme+host+port the client used to reach this API
                      (str(request.base_url), always ends with "/"). Used to
                      absolutize local-fallback paths; Cloudinary URLs are
                      already absolute and ignore it.
 
     Returns:
-        Absolute URL string, e.g. "https://res.cloudinary.com/..." or
-        "http://127.0.0.1:8000/uploads/<uuid>.jpg".
+        ``(url, content_type)`` where url is absolute, e.g.
+        "https://res.cloudinary.com/..." or
+        "http://127.0.0.1:8000/uploads/<uuid>.jpg", and content_type is the
+        RESOLVED image MIME (not necessarily what the client declared).
 
     Raises:
         StorageError: bad MIME type, empty/oversized file, or backend failure.
     """
-    data, extension = _validated_image_bytes(file)
+    data, content_type, extension = _validated_image_bytes(file)
 
     if _cloudinary_configured():
-        return _upload_to_cloudinary(data, file.content_type or "")
+        return _upload_to_cloudinary(data, content_type), content_type
 
     # Local fallback: keep the dev flow working with zero cloud setup.
     relative = _upload_to_local(data, extension)
     normalized_base = base_url if base_url.endswith("/") else f"{base_url}/"
-    return f"{normalized_base}{relative.lstrip('/')}"
+    return f"{normalized_base}{relative.lstrip('/')}", content_type

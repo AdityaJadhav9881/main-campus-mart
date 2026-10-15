@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' show MediaType;
 
 import '../models/product.dart';
 import '../models/user_profile.dart';
@@ -120,7 +121,7 @@ class ApiService {
       return 'Request timed out after ${timeout.inSeconds}s. '
           'Is the backend running at $baseUrl?';
     }
-    return 'Cannot reach the CampusMart API at $baseUrl. '
+    return 'Cannot reach the Campus Mart Ai API at $baseUrl. '
         'Start it with: uvicorn app.main:app --reload';
   }
 
@@ -188,6 +189,11 @@ class ApiService {
   ///
   /// Works on every platform (mobile, web, desktop) because bytes - not
   /// dart:io File objects - cross the layer boundary.
+  ///
+  /// The multipart part ALWAYS carries an explicit `Content-Type`. Without it
+  /// browsers and several Android HTTP stacks fall back to
+  /// `application/octet-stream`, which used to make the backend reject the
+  /// photo with a 400 (the "application/octet-stream" upload bug).
   Future<String> uploadListingImage({
     required Uint8List bytes,
     required String filename,
@@ -202,6 +208,7 @@ class ApiService {
             'file',
             bytes,
             filename: filename,
+            contentType: _imageMediaType(bytes, filename),
           ),
         );
 
@@ -214,6 +221,54 @@ class ApiService {
     } on Exception catch (error) {
       throw ApiException(_friendlyTransport(error));
     }
+  }
+
+  /// Resolves the media type for an uploaded photo.
+  ///
+  /// Priority: filename extension (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`,
+  /// `.heic`) -> leading magic bytes (JPEG/PNG/GIF/WebP) -> safe JPEG default.
+  static MediaType _imageMediaType(Uint8List bytes, String filename) {
+    final lower = filename.toLowerCase();
+    if (lower.endsWith('.png')) return MediaType('image', 'png');
+    if (lower.endsWith('.webp')) return MediaType('image', 'webp');
+    if (lower.endsWith('.gif')) return MediaType('image', 'gif');
+    if (lower.endsWith('.heic') || lower.endsWith('.heif')) {
+      return MediaType('image', 'heic');
+    }
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+      return MediaType('image', 'jpeg');
+    }
+
+    if (bytes.length >= 4) {
+      final isPng = bytes[0] == 0x89 &&
+          bytes[1] == 0x50 &&
+          bytes[2] == 0x4E &&
+          bytes[3] == 0x47;
+      if (isPng) return MediaType('image', 'png');
+
+      final isGif = bytes[0] == 0x47 && // G
+          bytes[1] == 0x49 && // I
+          bytes[2] == 0x46 && // F
+          bytes[3] == 0x38; // 8
+      if (isGif) return MediaType('image', 'gif');
+
+      final isJpeg = bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+      if (isJpeg) return MediaType('image', 'jpeg');
+
+      if (bytes.length >= 12) {
+        // "RIFF....WEBP"
+        final isWebp = bytes[0] == 0x52 && // R
+            bytes[1] == 0x49 && // I
+            bytes[2] == 0x46 && // F
+            bytes[3] == 0x46 && // F
+            bytes[8] == 0x57 && // W
+            bytes[9] == 0x45 && // E
+            bytes[10] == 0x42 && // B
+            bytes[11] == 0x50; // P
+        if (isWebp) return MediaType('image', 'webp');
+      }
+    }
+    return MediaType('image', 'jpeg');
   }
 
   /// GET /users/{firebase_uid} - public profile incl. trust score.
@@ -292,6 +347,36 @@ class ApiService {
     if (response.statusCode != 200) throw _apiError(response);
     return PurchaseResult.fromJson(_decodeMap(response));
   }
+
+  /// GET /transactions/my - the logged-in student's bought + sold history.
+  Future<TransactionHistory> fetchMyTransactions({required String token}) async {
+    final response = await _get('/transactions/my', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    final body = _decodeMap(response);
+    return TransactionHistory.fromJson(body);
+  }
+
+  /// DELETE /products/{product_id} - remove one of your own listings.
+  /// Returns normally on HTTP 204; throws [ApiException] otherwise
+  /// (403 for someone else's item, 400 when it already has buyers).
+  Future<void> deleteProduct({
+    required String productId,
+    required String token,
+  }) async {
+    try {
+      final uri = Uri.parse('$baseUrl/products/$productId');
+      final response = await http
+          .delete(uri, headers: _headers(token))
+          .timeout(timeout);
+      if (response.statusCode != 204 && response.statusCode != 200) {
+        throw _apiError(response);
+      }
+    } on ApiException {
+      rethrow;
+    } on Exception catch (error) {
+      throw ApiException(_friendlyTransport(error));
+    }
+  }
 }
 
 /// JWT + profile payload returned by /auth/register and /auth/login.
@@ -333,4 +418,68 @@ class PurchaseResult {
   final String productId;
   final double finalPrice;
   final String productStatus;
+}
+
+/// One row of GET /transactions/my (mirrors the backend `TransactionRead`).
+class TransactionRecord {
+  const TransactionRecord({
+    required this.id,
+    required this.productId,
+    required this.buyerId,
+    required this.finalPrice,
+    required this.status,
+    required this.timestamp,
+    this.productTitle,
+    this.productImageUrl,
+    this.productStatus,
+    this.buyerName,
+    this.sellerName,
+  });
+
+  factory TransactionRecord.fromJson(Map<String, dynamic> json) {
+    return TransactionRecord(
+      id: json['id']?.toString() ?? '',
+      productId: json['product_id']?.toString() ?? '',
+      buyerId: json['buyer_id']?.toString() ?? '',
+      finalPrice: (json['final_price'] as num?)?.toDouble() ?? 0,
+      status: json['status']?.toString() ?? 'completed',
+      timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ??
+          DateTime.now(),
+      productTitle: json['product_title']?.toString(),
+      productImageUrl: json['product_image_url']?.toString(),
+      productStatus: json['product_status']?.toString(),
+      buyerName: json['buyer_name']?.toString(),
+      sellerName: json['seller_name']?.toString(),
+    );
+  }
+
+  final String id;
+  final String productId;
+  final String buyerId;
+  final double finalPrice;
+  final String status;
+  final DateTime timestamp;
+  final String? productTitle;
+  final String? productImageUrl;
+  final String? productStatus;
+  final String? buyerName;
+  final String? sellerName;
+}
+
+/// Response body of GET /transactions/my: bought + sold history.
+class TransactionHistory {
+  const TransactionHistory({required this.bought, required this.sold});
+
+  factory TransactionHistory.fromJson(Map<String, dynamic> json) {
+    List<TransactionRecord> parse(String key) =>
+        (json[key] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(TransactionRecord.fromJson)
+            .toList(growable: false);
+
+    return TransactionHistory(bought: parse('bought'), sold: parse('sold'));
+  }
+
+  final List<TransactionRecord> bought;
+  final List<TransactionRecord> sold;
 }

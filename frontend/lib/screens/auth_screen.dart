@@ -251,24 +251,24 @@ class _Header extends StatelessWidget {
     return Column(
       children: [
         Container(
-          width: 64,
-          height: 64,
+          width: 96,
+          height: 96,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: AppColors.cyanAccent.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(26),
             border: Border.all(
               color: AppColors.cyanAccent.withOpacity(0.45),
             ),
           ),
-          child: const Icon(
-            Icons.school_outlined,
-            size: 30,
-            color: AppColors.cyanAccent,
+          child: const Image(
+            image: AssetImage('assets/logo.png'),
+            fit: BoxFit.cover,
           ),
         ),
         const SizedBox(height: 16),
         const Text(
-          'CampusMart AI',
+          'Campus Mart Ai',
           style: TextStyle(
             color: AppColors.textPrimary,
             fontSize: 26,

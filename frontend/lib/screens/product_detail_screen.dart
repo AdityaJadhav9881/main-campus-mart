@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../models/product.dart';
 import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
+import '../providers/wishlist_provider.dart';
 import '../services/api_service.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/category_icon.dart';
@@ -13,8 +14,9 @@ import '../widgets/condition_badge.dart';
 import '../widgets/trust_score_meter.dart';
 
 /// Route pushed from the feed: full product presentation with Hero image,
-/// AI price comparison, seller trust card, and the Phase 7 buy action wired
-/// to POST /products/{id}/purchase.
+/// the Multi-Agent AI Inspection Report, the live seller identity + trust
+/// score, similar campus listings, and a pinned Buy bar wired to
+/// POST /products/{id}/purchase.
 class ProductDetailScreen extends StatefulWidget {
   const ProductDetailScreen({super.key, required this.product});
 
@@ -97,13 +99,60 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final wishlist = context.watch<WishlistProvider>();
+    final saved = wishlist.contains(product.id);
+
     return Scaffold(
+      backgroundColor: AppColors.voidBlack,
+      // Pinned action bar: price on the left, Buy / Reserve Now on the right.
+      bottomNavigationBar: _BottomBuyBar(
+        product: product,
+        status: _status,
+        isPurchasing: _isPurchasing,
+        isOwnListing: _isOwnListing,
+        canBuy: _canBuy,
+        onBuy: _purchase,
+      ),
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
-            expandedHeight: 300,
+            expandedHeight: 320,
             pinned: true,
             backgroundColor: AppColors.voidBlack,
+            surfaceTintColor: Colors.transparent,
+            // Glass badges stay legible over bright photos AND dark ones.
+            leading: _GlassCircleButton(
+              icon: Icons.arrow_back,
+              tooltip: 'Back',
+              onTap: () => Navigator.of(context).maybePop(),
+            ),
+            actions: [
+              _GlassCircleButton(
+                icon: saved ? Icons.favorite : Icons.favorite_border,
+                tint: saved ? AppColors.danger : Colors.white,
+                tooltip: saved ? 'Remove from Saved' : 'Save listing',
+                onTap: () {
+                  final nowSaved =
+                      context.read<WishlistProvider>().toggle(product.id);
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(
+                      SnackBar(
+                        backgroundColor: AppColors.surfaceHigh,
+                        content: Text(
+                          nowSaved
+                              ? 'Saved to your wishlist'
+                              : 'Removed from your wishlist',
+                          style: const TextStyle(
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                    );
+                },
+              ),
+              const SizedBox(width: 6),
+            ],
             flexibleSpace: FlexibleSpaceBar(
               background: Stack(
                 fit: StackFit.expand,
@@ -121,8 +170,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       gradient: LinearGradient(
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
-                        colors: [Colors.transparent, Color(0xAA0A0E14)],
-                        stops: [0.55, 1.0],
+                        colors: [Color(0x55000000), Colors.transparent, Color(0xAA0A0E14)],
+                        stops: [0.0, 0.45, 1.0],
                       ),
                     ),
                   ),
@@ -132,11 +181,11 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           ),
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // --- Category tag + condition -----------------------------
+                  // --- Category tag + condition + status ------------------
                   Row(
                     children: [
                       _CategoryTag(label: product.category),
@@ -159,8 +208,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  _buildPriceSection(),
-                  const SizedBox(height: 22),
+                  _AiInspectionReport(product: product, status: _status),
+                  const SizedBox(height: 20),
                   Text(
                     product.description,
                     style: const TextStyle(
@@ -171,26 +220,20 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   ),
                   const SizedBox(height: 26),
                   _buildSellerCard(),
-                  const SizedBox(height: 26),
-                  FilledButton.icon(
-                    icon: _isPurchasing
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
-                            ),
-                          )
-                        : Icon(
-                            _status == 'sold'
-                                ? Icons.check_circle_outline
-                                : Icons.shopping_bag_outlined,
-                            size: 20,
+                  if (_similarListings().isNotEmpty) ...[
+                    const SizedBox(height: 26),
+                    _SimilarListingsSection(
+                      products: _similarListings(),
+                      onOpen: (similar) {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                ProductDetailScreen(product: similar),
                           ),
-                    label: Text(_buyButtonLabel()),
-                    onPressed: _canBuy ? _purchase : null,
-                  ),
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -200,55 +243,35 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     );
   }
 
-  String _buyButtonLabel() {
-    if (_isPurchasing) return 'Processing...';
-    if (_status == 'sold') return 'Sold';
-    if (_status == 'flagged') return 'Under Review';
-    if (_isOwnListing) return 'Your Listing';
-    return 'Buy Now — \$${product.listedPrice.toStringAsFixed(2)}';
-  }
+  /// "Similar Campus Listings": same category first, then title-word overlap
+  /// with the rest of the live feed (self excluded).
+  List<Product> _similarListings() {
+    final feed = context.read<ProductProvider>().products;
+    final candidates =
+        feed.where((item) => item.id != product.id).toList(growable: false);
+    if (candidates.isEmpty) return const <Product>[];
 
-  // ---------------------------------------------------------------------------
-  // Price + AI comparison
-  // ---------------------------------------------------------------------------
-  Widget _buildPriceSection() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'LISTED PRICE',
-            style: TextStyle(
-              color: AppColors.textMuted,
-              fontSize: 10.5,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.1,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '\$${product.listedPrice.toStringAsFixed(2)}',
-            style: const TextStyle(
-              color: AppColors.cyanAccent,
-              fontSize: 30,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          if (product.suggestedPrice case final double? suggested
-              when suggested != null) ...[
-            const SizedBox(height: 12),
-            _ComparisonTag(suggestedPrice: suggested, listedPrice: product.listedPrice),
-          ],
-        ],
-      ),
-    );
+    final words = product.title
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .where((word) => word.length > 3)
+        .toSet();
+
+    int score(Product item) {
+      var value = item.category == product.category ? 100 : 0;
+      for (final word in words) {
+        if (item.title.toLowerCase().contains(word)) value += 10;
+      }
+      return value;
+    }
+
+    final ranked = [...candidates]..sort((a, b) {
+        final byScore = score(b).compareTo(score(a));
+        if (byScore != 0) return byScore;
+        return b.createdAt.compareTo(a.createdAt);
+      });
+
+    return ranked.take(8).toList(growable: false);
   }
 
   // ---------------------------------------------------------------------------
@@ -256,6 +279,9 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   // ---------------------------------------------------------------------------
   Widget _buildSellerCard() {
     final trustScore = product.sellerTrustScore ?? 5.0;
+    final sellerName = (product.sellerName ?? '').trim();
+    final displayName = sellerName.isEmpty ? 'Campus Seller' : sellerName;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -267,39 +293,636 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
               CircleAvatar(
                 radius: 22,
                 backgroundColor: AppColors.surfaceHigh,
-                child: Icon(
-                  Icons.school_outlined,
-                  color: AppColors.cyanAccent,
-                  size: 22,
+                child: Text(
+                  displayName.isEmpty
+                      ? '?'
+                      : displayName.trim()[0].toUpperCase(),
+                  style: const TextStyle(
+                    color: AppColors.cyanAccent,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
-              SizedBox(width: 12),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Campus Seller',
-                      style: TextStyle(
+                      displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
                         color: AppColors.textPrimary,
                         fontSize: 15,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    SizedBox(height: 5),
-                    _VerifiedBadge(),
+                    const SizedBox(height: 5),
+                    const _VerifiedBadge(),
                   ],
+                ),
+              ),
+              Text(
+                '${trustScore.toStringAsFixed(1)} / 5.0',
+                style: const TextStyle(
+                  color: AppColors.cyanAccent,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 16),
           TrustScoreMeter(score: trustScore, label: 'Trust score'),
+        ],
+      ),
+    );
+  }
+}
+
+/// Dark circular glassmorphic button used over the product photo
+/// (back arrow + wishlist heart).
+class _GlassCircleButton extends StatelessWidget {
+  const _GlassCircleButton({
+    required this.icon,
+    required this.onTap,
+    this.tooltip,
+    this.tint = Colors.white,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+  final String? tooltip;
+  final Color tint;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = Material(
+      color: Colors.transparent,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Container(
+          width: 38,
+          height: 38,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.black.withOpacity(0.52),
+            border: Border.all(color: Colors.white24),
+            boxShadow: const [
+              BoxShadow(color: Colors.black38, blurRadius: 8),
+            ],
+          ),
+          child: Icon(icon, size: 20, color: tint),
+        ),
+      ),
+    );
+    if (tooltip == null) return Padding(padding: const EdgeInsets.all(6), child: button);
+    return Padding(
+      padding: const EdgeInsets.all(6),
+      child: Tooltip(message: tooltip!, child: button),
+    );
+  }
+}
+
+/// "✨ Multi-Agent AI Inspection Report" - what each LangGraph agent decided
+/// about this listing before it was allowed into the feed.
+class _AiInspectionReport extends StatelessWidget {
+  const _AiInspectionReport({required this.product, required this.status});
+
+  final Product product;
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final suggested = product.suggestedPrice;
+    final isSafe = status == 'active';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.auto_awesome, size: 15, color: AppColors.cyanAccent),
+              SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Multi-Agent AI Inspection Report',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // 1. Listing Intelligence Agent -------------------------------------
+          _ReportRow(
+            icon: Icons.category_outlined,
+            color: AppColors.cyanAccent,
+            agent: 'Listing Intelligence Agent',
+            child: Text(
+              'Verified category: ${product.category} · Condition: '
+              '${product.condition}',
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12.5,
+                height: 1.4,
+              ),
+            ),
+          ),
+          const _ReportDivider(),
+
+          // 2. Price Prediction Agent ----------------------------------------
+          _ReportRow(
+            icon: Icons.insights_outlined,
+            color: AppColors.warning,
+            agent: 'Price Prediction Agent',
+            child: _PriceComparison(
+              listed: product.listedPrice,
+              suggested: suggested,
+            ),
+          ),
+          const _ReportDivider(),
+
+          // 3. Trust & Fraud Agent -------------------------------------------
+          _ReportRow(
+            icon: isSafe ? Icons.verified_user_outlined : Icons.gpp_maybe_outlined,
+            color: isSafe ? AppColors.success : AppColors.danger,
+            agent: 'Trust & Fraud Agent',
+            child: Row(
+              children: [
+                Icon(
+                  isSafe ? Icons.check_circle : Icons.error_outline,
+                  size: 14,
+                  color: isSafe ? AppColors.success : AppColors.danger,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isSafe
+                        ? 'Verified Safe Listing — passed scam & abuse screening'
+                        : 'Held for review: '
+                            '${product.trustReason ?? 'failed safety screening'}',
+                    style: TextStyle(
+                      color: isSafe ? AppColors.success : AppColors.danger,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One agent row: agent icon + name on top, its verdict below.
+class _ReportRow extends StatelessWidget {
+  const _ReportRow({
+    required this.icon,
+    required this.color,
+    required this.agent,
+    required this.child,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String agent;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                agent.toUpperCase(),
+                style: const TextStyle(
+                  color: AppColors.textMuted,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.9,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 7),
+        child,
+      ],
+    );
+  }
+}
+
+class _ReportDivider extends StatelessWidget {
+  const _ReportDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 12),
+      child: Divider(color: AppColors.hairline),
+    );
+  }
+}
+
+/// Visual Listed-vs-AI-Fair-Value comparison with a savings badge.
+class _PriceComparison extends StatelessWidget {
+  const _PriceComparison({required this.listed, required this.suggested});
+
+  final double listed;
+  final double? suggested;
+
+  @override
+  Widget build(BuildContext context) {
+    if (suggested == null || suggested! <= 0) {
+      return const Text(
+        'AI fair value pending — pricing model will confirm on demand.',
+        style: TextStyle(
+          color: AppColors.textMuted,
+          fontSize: 12.5,
+          height: 1.4,
+        ),
+      );
+    }
+
+    final fair = suggested!;
+    final below = listed < fair;
+    final percent =
+        ((fair - listed) / fair * 100).round().abs().clamp(0, 99).toInt();
+    final maxPrice = listed > fair ? listed : fair;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Listed  \$${listed.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            if (below)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.success.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.success.withOpacity(0.5)),
+                ),
+                child: Text(
+                  '$percent% BELOW AI VALUE',
+                  style: const TextStyle(
+                    color: AppColors.success,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        _PriceBar(
+          label: 'Listed',
+          value: listed,
+          max: maxPrice,
+          color: AppColors.cyanAccent,
+        ),
+        const SizedBox(height: 6),
+        _PriceBar(
+          label: 'AI fair',
+          value: fair,
+          max: maxPrice,
+          color: AppColors.warning,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          below
+              ? 'You save \$${(fair - listed).toStringAsFixed(2)} vs the AI fair value.'
+              : 'AI fair value is \$${fair.toStringAsFixed(2)} — '
+                  '\$${(listed - fair).toStringAsFixed(2)} above estimate.',
+          style: TextStyle(
+            color: below ? AppColors.success : AppColors.warning,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PriceBar extends StatelessWidget {
+  const _PriceBar({
+    required this.label,
+    required this.value,
+    required this.max,
+    required this.color,
+  });
+
+  final String label;
+  final double value;
+  final double max;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final fraction = max <= 0 ? 0.0 : (value / max).clamp(0.0, 1.0).toDouble();
+    return Row(
+      children: [
+        SizedBox(
+          width: 56,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 7,
+              backgroundColor: AppColors.surfaceHigh,
+              color: color,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 58,
+          child: Text(
+            '\$${value.toStringAsFixed(2)}',
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: color,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Horizontal "Similar Campus Listings" rail (no Hero tags - the same item
+/// may also exist on the source route's grid).
+class _SimilarListingsSection extends StatelessWidget {
+  const _SimilarListingsSection({required this.products, required this.onOpen});
+
+  final List<Product> products;
+  final ValueChanged<Product> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.grid_view_outlined, size: 15, color: AppColors.cyanAccent),
+            SizedBox(width: 7),
+            Text(
+              'Similar Campus Listings',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 168,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: products.length,
+            separatorBuilder: (context, index) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final item = products[index];
+              return SizedBox(
+                width: 132,
+                child: Material(
+                  color: AppColors.surface,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    side: const BorderSide(color: AppColors.hairline),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => onOpen(item),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: item.imageUrl.isEmpty
+                              ? ImageFallbackIcon(
+                                  category: item.category,
+                                  size: 28,
+                                )
+                              : Image.network(
+                                  item.imageUrl,
+                                  fit: BoxFit.cover,
+                                  width: double.infinity,
+                                  errorBuilder: (context, error, stack) =>
+                                      ImageFallbackIcon(
+                                    category: item.category,
+                                    size: 28,
+                                  ),
+                                ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 8, 8, 9),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      '\$${item.listedPrice.toStringAsFixed(2)}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: AppColors.cyanAccent,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                  const Icon(
+                                    Icons.shield_outlined,
+                                    size: 11,
+                                    color: AppColors.cyanAccent,
+                                  ),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    (item.sellerTrustScore ?? 5.0)
+                                        .toStringAsFixed(1),
+                                    style: const TextStyle(
+                                      color: AppColors.textMuted,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Pinned bottom action bar: price summary left, primary Buy button right.
+class _BottomBuyBar extends StatelessWidget {
+  const _BottomBuyBar({
+    required this.product,
+    required this.status,
+    required this.isPurchasing,
+    required this.isOwnListing,
+    required this.canBuy,
+    required this.onBuy,
+  });
+
+  final Product product;
+  final String status;
+  final bool isPurchasing;
+  final bool isOwnListing;
+  final bool canBuy;
+  final VoidCallback onBuy;
+
+  String get _label {
+    if (isPurchasing) return 'Processing...';
+    if (status == 'sold') return 'Sold';
+    if (status == 'flagged') return 'Under Review';
+    if (isOwnListing) return 'Your Listing';
+    return 'Buy / Reserve Now';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    final sold = status == 'sold';
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottom),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(top: BorderSide(color: AppColors.hairline)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'YOUR PRICE',
+                  style: TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '\$${product.listedPrice.toStringAsFixed(2)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: sold ? AppColors.textMuted : AppColors.cyanAccent,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 190,
+            child: FilledButton(
+              onPressed: canBuy ? onBuy : null,
+              child: isPurchasing
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: Colors.black,
+                      ),
+                    )
+                  : Text(
+                      _label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+            ),
+          ),
         ],
       ),
     );
@@ -361,60 +984,6 @@ class _VerifiedBadge extends StatelessWidget {
               color: AppColors.cyanAccent,
               fontSize: 10,
               fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Compares the seller's asking price against the AI fair value and renders
-/// an explanatory tag ("Fair Resale Value confirmed by AI" when fair).
-class _ComparisonTag extends StatelessWidget {
-  const _ComparisonTag({
-    required this.suggestedPrice,
-    required this.listedPrice,
-  });
-
-  final double suggestedPrice;
-  final double listedPrice;
-
-  @override
-  Widget build(BuildContext context) {
-    final isFair = listedPrice <= suggestedPrice;
-    final color = isFair ? AppColors.success : AppColors.warning;
-    final text = isFair
-        ? 'Fair Resale Value confirmed by AI '
-            '(fair value \$${suggestedPrice.toStringAsFixed(2)})'
-        : 'AI fair value is \$${suggestedPrice.toStringAsFixed(2)} - '
-            'this listing is '
-            '\$${(listedPrice - suggestedPrice).toStringAsFixed(2)} above estimate';
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.45)),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            isFair ? Icons.verified_outlined : Icons.insights_outlined,
-            size: 16,
-            color: color,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                color: color,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                height: 1.35,
-              ),
             ),
           ),
         ],

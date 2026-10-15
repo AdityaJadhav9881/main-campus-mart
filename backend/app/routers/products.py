@@ -22,8 +22,10 @@ filters on status='active'.
 """
 
 import logging
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from ..ai.orchestrator import ai_orchestrator
@@ -54,7 +56,10 @@ async def upload_listing_image(
 
     Phase 6 cloud pipeline:
         1. Auth required (same bearer token as listing creation).
-        2. Image is validated (MIME allow-list, 5 MB cap).
+        2. Image is validated (MIME allow-list, 5 MB cap). Uploads that arrive
+           as `application/octet-stream` / with no content type - the normal
+           case for Android's image_picker - are identified from their magic
+           bytes (or filename extension) instead of being rejected with 400.
         3. Uploaded to Cloudinary when CLOUDINARY_* env vars are set;
            otherwise written to /backend/uploads and served by this API.
         4. Returns {"image_url": "https://..."} which the Flutter client
@@ -75,7 +80,9 @@ async def upload_listing_image(
         )
 
     try:
-        image_url = save_upload(file, base_url=str(request.base_url))
+        image_url, content_type = save_upload(
+            file, base_url=str(request.base_url)
+        )
     except StorageError as exc:
         logger.warning("Image upload rejected for %s: %s", firebase_uid, exc)
         raise HTTPException(
@@ -83,7 +90,15 @@ async def upload_listing_image(
             detail=str(exc),
         ) from exc
 
-    logger.info("Image uploaded by %s -> %s", firebase_uid, image_url)
+    # content_type is the RESOLVED type (sniffed when the client sent
+    # application/octet-stream), so moderators can see what really landed.
+    logger.info(
+        "Image uploaded by %s -> %s (%s, declared %s)",
+        firebase_uid,
+        image_url,
+        content_type,
+        file.content_type or "none",
+    )
     return {"image_url": image_url}
 
 
@@ -209,3 +224,74 @@ def list_active_products(db: Session = Depends(get_db)) -> list[Product]:
         .order_by(Product.created_at.desc())
         .all()
     )
+
+
+@router.delete(
+    "/{product_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete your own listing",
+)
+def delete_own_listing(
+    product_id: UUID,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove a listing the authenticated student owns.
+
+    Guards (mirrors the create/upload policy):
+        * 404 - listing does not exist.
+        * 403 - blocked account.
+        * 403 - someone else's listing (admins use DELETE /admin/listings/{id}).
+        * 400 - already sold (purchase history is append-only and the FK is
+          ON DELETE RESTRICT, so the row must be kept).
+
+    Seller trust is intentionally NOT penalised here: a student cleaning up
+    their own posts is normal marketplace behaviour (the -0.8 penalty stays
+    reserved for admin moderation deletes).
+    """
+    firebase_uid = extract_uid(token)
+    user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Create your profile first (POST /users/) before listing products.",
+        )
+    if user.status == "blocked":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been blocked. Contact campus support.",
+        )
+
+    product = (
+        db.query(Product)
+        .options(joinedload(Product.seller))
+        .filter(Product.id == product_id)
+        .first()
+    )
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+    if product.seller_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete your own listings.",
+        )
+    if product.status == "sold":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sold listings are kept as purchase history and cannot be deleted.",
+        )
+
+    db.delete(product)
+    try:
+        db.commit()
+    except IntegrityError as exc:  # FK RESTRICT from an existing transaction
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete a listing with existing purchase history.",
+        ) from exc
+
+    logger.info("Listing '%s' deleted by owner %s", product_id, user.email)

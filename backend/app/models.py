@@ -224,6 +224,15 @@ class Product(Base):
         """Seller's current trust score, or None if the seller row is gone."""
         return self.seller.trust_score if self.seller else None
 
+    @property
+    def seller_name(self) -> "str | None":
+        """Seller's display name for the mobile detail/profile screens.
+
+        Mirrors `seller_trust_score`: read-only, derived from the relationship
+        (GET /products/ eager-loads `seller` via joinedload, so this is free).
+        """
+        return self.seller.name if self.seller else None
+
 
 class Transaction(Base):
     """An immutable purchase record: which buyer bought which product, for how

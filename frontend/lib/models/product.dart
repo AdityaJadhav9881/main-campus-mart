@@ -19,6 +19,7 @@ class Product {
     this.status = 'active',
     this.trustReason,
     this.sellerTrustScore,
+    this.sellerName,
   });
 
   /// Builds a [Product] from the snake_case JSON produced by FastAPI.
@@ -38,6 +39,7 @@ class Product {
       status: json['status']?.toString() ?? 'active',
       trustReason: json['trust_reason']?.toString(),
       sellerTrustScore: _toDouble(json['seller_trust_score']),
+      sellerName: json['seller_name']?.toString(),
     );
   }
 
@@ -63,8 +65,11 @@ class Product {
 
   final DateTime createdAt;
 
-  /// Seller's trust score (0-10, neutral default 5.0) as of read time.
+  /// Seller's trust score (0-5.0, neutral default 5.0) as of read time.
   final double? sellerTrustScore;
+
+  /// Seller's display name (null on payloads from older backends).
+  final String? sellerName;
 
   /// Serializes back to the API's snake_case contract.
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -81,6 +86,7 @@ class Product {
         'trust_reason': trustReason,
         'created_at': createdAt.toIso8601String(),
         'seller_trust_score': sellerTrustScore,
+        'seller_name': sellerName,
       };
 
   /// Accepts num (int/double from JSON), numeric String, or null when reading

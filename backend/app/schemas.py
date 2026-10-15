@@ -145,6 +145,11 @@ class ProductRead(BaseModel):
                     "null only if the seller row is missing. Added in Phase 4 "
                     "for the mobile trust indicators.",
     )
+    seller_name: str | None = Field(
+        default=None,
+        description="Seller's display name so the product detail screen can "
+                    "show who is selling (added for the production UI).",
+    )
     status: str = Field(
         description="Lifecycle state: 'active' | 'sold' | 'flagged'.",
     )

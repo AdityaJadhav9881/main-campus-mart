@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import 'providers/auth_provider.dart';
 import 'providers/product_provider.dart';
+import 'providers/wishlist_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/create_listing_screen.dart';
 import 'screens/feed_screen.dart';
@@ -28,6 +29,11 @@ class CampusMartApp extends StatelessWidget {
         ChangeNotifierProvider<AuthProvider>(
           create: (_) => AuthProvider()..bootstrap(),
         ),
+        // Wishlist hearts are independent of auth (persisted locally), so a
+        // plain provider is enough - load() restores saved IDs on boot.
+        ChangeNotifierProvider<WishlistProvider>(
+          create: (_) => WishlistProvider()..load(),
+        ),
         ChangeNotifierProxyProvider<AuthProvider, ProductProvider>(
           create: (context) => ProductProvider(context.read<AuthProvider>()),
           update: (_, auth, previous) =>
@@ -35,7 +41,7 @@ class CampusMartApp extends StatelessWidget {
         ),
       ],
       child: MaterialApp(
-        title: 'CampusMart AI',
+        title: 'Campus Mart Ai',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.dark,
         home: const _AuthGate(),

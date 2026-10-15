@@ -22,8 +22,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 300));
 
-    // CampusMart branding + the Log In / Sign Up toggle must be visible.
-    expect(find.text('CampusMart AI'), findsOneWidget);
+    // Campus branding + the Log In / Sign Up toggle must be visible.
+    expect(find.text('Campus Mart Ai'), findsOneWidget);
     expect(find.text('Sign Up'), findsWidgets);
     expect(find.text('College email'), findsOneWidget);
   });

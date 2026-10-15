@@ -3,14 +3,20 @@ import 'package:provider/provider.dart';
 
 import '../models/product.dart';
 import '../providers/product_provider.dart';
+import '../services/recommendations.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/product_card.dart';
 import 'product_detail_screen.dart';
 
-/// Tab 1 - Discovery Feed.
+/// Tab 1 - Discover (the complete marketplace home).
 ///
-/// Campus branding + search bar in the app bar, category filter chips below,
-/// then a pull-to-refresh 2-column grid of active listings.
+/// Top to bottom:
+///   1. Branding AppBar (custom logo + `Campus Mart Ai`) with search field.
+///   2. ✨ AI Recommended For You - a horizontal rail ranked by the
+///      Recommendation Engine (value vs AI fair price + seller trust).
+///   3. Category chips built from the categories ACTUALLY present in the feed,
+///      plus a Sort bottom-sheet (Newest / Price / AI Value / Trust).
+///   4. Pull-to-refresh 2-column grid of upgraded product cards.
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
 
@@ -18,20 +24,37 @@ class FeedScreen extends StatefulWidget {
   State<FeedScreen> createState() => _FeedScreenState();
 }
 
-class _FeedScreenState extends State<FeedScreen> {
-  /// Categories are client-side filters over the AI-assigned (or seeded)
-  /// `category` field. "Lab Gear & Instruments" currently only matches
-  /// seeded listings and shows the empty state until more AI categories land.
-  static const List<String> _categories = <String>[
-    'All',
-    'Academic Material',
-    'Lab Gear & Instruments',
-    'Electronics',
-  ];
+/// Sort options offered in the Sort sheet (label -> id).
+class _SortOption {
+  const _SortOption(this.id, this.label, this.icon);
 
+  final String id;
+  final String label;
+  final IconData icon;
+}
+
+const List<_SortOption> _sortOptions = <_SortOption>[
+  _SortOption('newest', 'Newest', Icons.schedule_outlined),
+  _SortOption('price_asc', 'Price: Low to High', Icons.arrow_upward),
+  _SortOption('price_desc', 'Price: High to Low', Icons.arrow_downward),
+  _SortOption('ai_value', 'Best AI Value', Icons.auto_awesome),
+  _SortOption('trust', 'Highest Trust', Icons.shield_outlined),
+];
+
+/// Preferred display order for the marketplace's known categories; anything
+/// else discovered in the feed is appended alphabetically.
+const List<String> _knownCategories = <String>[
+  'Electronics',
+  'Academic Material',
+  'Lab Gear & Instruments',
+  'Other',
+];
+
+class _FeedScreenState extends State<FeedScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _query = '';
   String _category = 'All';
+  String _sort = 'newest';
 
   @override
   void initState() {
@@ -52,6 +75,24 @@ class _FeedScreenState extends State<FeedScreen> {
     super.dispose();
   }
 
+  /// Categories for the chip row: `All` + every category actually present in
+  /// the feed (known ones first, then any AI-assigned extras).
+  List<String> _categoriesFor(List<Product> all) {
+    final present = all
+        .map((product) => product.category)
+        .where((category) => category.trim().isNotEmpty)
+        .toSet();
+
+    final chips = <String>['All'];
+    for (final known in _knownCategories) {
+      if (present.contains(known)) chips.add(known);
+    }
+    final extras = present.where((c) => !_knownCategories.contains(c)).toList()
+      ..sort();
+    chips.addAll(extras);
+    return chips;
+  }
+
   /// Applies the active category chip + search query to the provider list.
   List<Product> _applyFilters(List<Product> all) {
     final query = _query.trim().toLowerCase();
@@ -64,6 +105,29 @@ class _FeedScreenState extends State<FeedScreen> {
     }).toList();
   }
 
+  List<Product> _applySort(List<Product> items) {
+    final sorted = List<Product>.from(items);
+    switch (_sort) {
+      case 'price_asc':
+        sorted.sort((a, b) => a.listedPrice.compareTo(b.listedPrice));
+      case 'price_desc':
+        sorted.sort((a, b) => b.listedPrice.compareTo(a.listedPrice));
+      case 'ai_value':
+        sorted.sort(
+          (a, b) => RecommendationEngine.valueScore(b)
+              .compareTo(RecommendationEngine.valueScore(a)),
+        );
+      case 'trust':
+        sorted.sort(
+          (a, b) => (b.sellerTrustScore ?? 0).compareTo(a.sellerTrustScore ?? 0),
+        );
+      case 'newest':
+      default:
+        sorted.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    }
+    return sorted;
+  }
+
   void _openDetail(Product product) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -72,20 +136,90 @@ class _FeedScreenState extends State<FeedScreen> {
     );
   }
 
+  Future<void> _openSortSheet() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 18, 20, 6),
+                child: Text(
+                  'SORT LISTINGS',
+                  style: TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ),
+              for (final option in _sortOptions)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    option.icon,
+                    size: 19,
+                    color: option.id == _sort
+                        ? AppColors.cyanAccent
+                        : AppColors.textMuted,
+                  ),
+                  title: Text(
+                    option.label,
+                    style: TextStyle(
+                      color: option.id == _sort
+                          ? AppColors.cyanAccent
+                          : AppColors.textPrimary,
+                      fontSize: 14.5,
+                      fontWeight: option.id == _sort
+                          ? FontWeight.w700
+                          : FontWeight.w500,
+                    ),
+                  ),
+                  trailing: option.id == _sort
+                      ? const Icon(Icons.check, size: 18, color: AppColors.cyanAccent)
+                      : null,
+                  onTap: () => Navigator.of(sheetContext).pop(option.id),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+    if (selected != null && mounted) setState(() => _sort = selected);
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<ProductProvider>();
-    final visible = _applyFilters(provider.products);
+    final visible = _applySort(_applyFilters(provider.products));
+    final categories = _categoriesFor(provider.products);
+
+    // The rail is a browsing aid - hide it once the user starts narrowing.
+    final showRecommendations =
+        _category == 'All' && _query.trim().isEmpty && provider.products.length > 2;
 
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 16,
         title: const Row(
           children: [
-            Icon(
-              Icons.school_outlined,
-              color: AppColors.cyanAccent,
-              size: 26,
+            ClipRRect(
+              borderRadius: BorderRadius.all(Radius.circular(8)),
+              child: Image(
+                image: AssetImage('assets/logo.png'),
+                width: 30,
+                height: 30,
+                fit: BoxFit.cover,
+              ),
             ),
             SizedBox(width: 10),
             Text.rich(
@@ -99,7 +233,7 @@ class _FeedScreenState extends State<FeedScreen> {
                     ),
                   ),
                   TextSpan(
-                    text: 'Mart AI',
+                    text: ' Mart Ai',
                     style: TextStyle(
                       color: AppColors.cyanAccent,
                       fontWeight: FontWeight.w800,
@@ -145,44 +279,101 @@ class _FeedScreenState extends State<FeedScreen> {
       ),
       body: Column(
         children: [
-          _buildCategoryChips(),
+          if (showRecommendations) ...[
+            _AiRecommendationRail(
+              products: provider.products,
+              onOpen: _openDetail,
+            ),
+          ],
+          _buildFilterRow(categories),
           Expanded(child: _buildBody(provider, visible)),
         ],
       ),
     );
   }
 
-  /// Horizontal scrollable row of category filter chips.
-  Widget _buildCategoryChips() {
+  /// Category chips (dynamic) + a Sort button that opens the sort sheet.
+  Widget _buildFilterRow(List<String> categories) {
+    final sortLabel =
+        _sortOptions.firstWhere((option) => option.id == _sort).label;
     return SizedBox(
       height: 56,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-        itemCount: _categories.length,
-        separatorBuilder: (context, index) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final category = _categories[index];
-          final selected = category == _category;
-          return ChoiceChip(
-            label: Text(category),
-            selected: selected,
-            showCheckmark: false,
-            visualDensity: VisualDensity.compact,
-            onSelected: (_) => setState(() => _category = category),
-            selectedColor: AppColors.cyanAccent,
-            backgroundColor: AppColors.surface,
-            side: const BorderSide(color: AppColors.hairline),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(999),
+      child: Row(
+        children: [
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+              itemCount: categories.length,
+              separatorBuilder: (context, index) => const SizedBox(width: 8),
+              itemBuilder: (context, index) {
+                final category = categories[index];
+                final selected = category == _category;
+                return ChoiceChip(
+                  label: Text(category),
+                  selected: selected,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (_) => setState(() => _category = category),
+                  selectedColor: AppColors.cyanAccent,
+                  backgroundColor: AppColors.surface,
+                  side: const BorderSide(color: AppColors.hairline),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  labelStyle: TextStyle(
+                    color: selected ? Colors.black : AppColors.textMuted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                );
+              },
             ),
-            labelStyle: TextStyle(
-              color: selected ? Colors.black : AppColors.textMuted,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 12, 16, 4),
+            child: Tooltip(
+              message: 'Sorted by: $sortLabel',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: _openSortSheet,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _sort == 'newest'
+                        ? AppColors.surface
+                        : AppColors.cyanAccent.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: _sort == 'newest'
+                          ? AppColors.hairline
+                          : AppColors.cyanAccent.withOpacity(0.5),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.sort,
+                        size: 15,
+                        color: AppColors.cyanAccent,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _sort == 'newest' ? 'Sort' : 'Sorted',
+                        style: const TextStyle(
+                          color: AppColors.cyanAccent,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
@@ -245,7 +436,7 @@ class _FeedScreenState extends State<FeedScreen> {
                 crossAxisCount: 2,
                 mainAxisSpacing: 12,
                 crossAxisSpacing: 12,
-                childAspectRatio: 0.64,
+                childAspectRatio: 0.60,
               ),
               itemCount: visible.length,
               itemBuilder: (context, index) {
@@ -260,6 +451,227 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   String get _queryHint => _query.isEmpty ? '' : ' "$_query"';
+}
+
+/// Horizontal "✨ AI Recommended For You" rail.
+///
+/// Ranking comes from [RecommendationEngine], which scores each listing on
+/// value (listed price vs AI fair price) and the seller's live trust score.
+class _AiRecommendationRail extends StatelessWidget {
+  const _AiRecommendationRail({required this.products, required this.onOpen});
+
+  final List<Product> products;
+  final ValueChanged<Product> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final picks = RecommendationEngine.rankForYou(products, limit: 6);
+    if (picks.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
+            children: [
+              Icon(Icons.auto_awesome, size: 15, color: AppColors.cyanAccent),
+              SizedBox(width: 6),
+              Text(
+                'AI Recommended For You',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 178,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            itemCount: picks.length,
+            separatorBuilder: (context, index) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final product = picks[index];
+              return _RecommendationCard(
+                product: product,
+                reason: RecommendationEngine.reasonFor(product),
+                onTap: () => onOpen(product),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Compact card used inside the AI recommendation rail.
+class _RecommendationCard extends StatelessWidget {
+  const _RecommendationCard({
+    required this.product,
+    required this.reason,
+    required this.onTap,
+  });
+
+  final Product product;
+  final String reason;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final suggested = product.suggestedPrice;
+    final below = suggested != null && suggested > 0 && product.listedPrice < suggested;
+
+    return SizedBox(
+      width: 138,
+      child: Material(
+        color: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: AppColors.cyanAccent.withOpacity(0.35),
+            width: 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // NOTE: no Hero here on purpose - this card can appear
+                    // alongside the grid card for the same product, and two
+                    // Heroes sharing a tag on one route is a Flutter error.
+                    product.imageUrl.isEmpty
+                        ? const ColoredBox(color: AppColors.surfaceHigh)
+                        : Image.network(
+                            product.imageUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stack) =>
+                                const ColoredBox(color: AppColors.surfaceHigh),
+                            loadingBuilder: (context, child, progress) =>
+                                progress == null
+                                    ? child
+                                    : const Center(
+                                        child: SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: AppColors.cyanAccent,
+                                          ),
+                                        ),
+                                      ),
+                          ),
+                    if (below)
+                      const Positioned(
+                        top: 6,
+                        left: 6,
+                        child: _AiPickBadge(),
+                      ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 8, 8, 9),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      product.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '\$${product.listedPrice.toStringAsFixed(2)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.cyanAccent,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.shield_outlined,
+                          size: 12,
+                          color: AppColors.cyanAccent,
+                        ),
+                        const SizedBox(width: 2),
+                        Text(
+                          (product.sellerTrustScore ?? 5.0).toStringAsFixed(1),
+                          style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      reason,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Small "AI PICK" tag drawn over a recommended photo.
+class _AiPickBadge extends StatelessWidget {
+  const _AiPickBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.cyanAccent.withOpacity(0.95),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Text(
+        'AI PICK',
+        style: TextStyle(
+          color: Colors.black,
+          fontSize: 8,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.4,
+        ),
+      ),
+    );
+  }
 }
 
 /// Scrollable empty/error content that still allows pull-to-refresh
