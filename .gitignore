@@ -11,6 +11,10 @@ firebase-adminsdk.json
 # --- Local image-upload fallback (Phase 6) - Cloudinary owns prod media ------
 backend/uploads/
 
+# --- Built release APK (distributed via GitHub Releases, not the repo) -------
+campusmart-ai.apk
+*.apk
+
 # --- Python ------------------------------------------------------------------
 __pycache__/
 *.py[cod]

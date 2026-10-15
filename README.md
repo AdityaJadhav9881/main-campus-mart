@@ -139,7 +139,7 @@ flutter run -d chrome       # Web
 Base-URL behavior: Android emulator uses `10.0.2.2:8000`; everything else uses `127.0.0.1:8000`. For a deployed backend:
 
 ```bash
-flutter build web --release --dart-define=API_BASE_URL=https://campusmart-api.onrender.com
+flutter build web --release --dart-define=API_BASE_URL=https://campusmart-api-zia4.onrender.com
 ```
 
 ---
@@ -183,10 +183,10 @@ flutter build apk --release  # Android release APK (see "Building the Android AP
 3. When prompted for `sync: false` secrets, paste:
    - `FIREBASE_SERVICE_ACCOUNT_KEY` — Firebase Console → Project settings → Service accounts → Generate new private key
    - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` — Cloudinary dashboard → API Keys
-4. Wait for the deploy; verify `https://campusmart-api.onrender.com/` returns `{"status": "CampusMart API is running"}`.
+4. Wait for the deploy; verify `https://campusmart-api-zia4.onrender.com/` returns `{"status": "CampusMart API is running"}`.
 5. Seed once against the managed database: `DATABASE_URL=<render-db-url> python seed_db.py` (or use any Postgres client).
 6. Harden CORS: set `CORS_ORIGINS=https://your-app.vercel.app` on the service.
-7. Deploy the Flutter web build to Vercel with `--dart-define=API_BASE_URL=https://campusmart-api.onrender.com`.
+7. Deploy the Flutter web build to Vercel with `--dart-define=API_BASE_URL=https://campusmart-api-zia4.onrender.com`.
 
 > **Security notes:** `AUTH_DEV_BYPASS` is `false` in the Render blueprint by default — keep it that way. Render's disk is ephemeral, so the Cloudinary credentials are **required** in production (local-fallback uploads would vanish on redeploy).
 
@@ -199,7 +199,7 @@ production base URL baked in:
 
 ```bash
 cd frontend
-flutter build apk --release --dart-define=API_BASE_URL=https://campusmart-api.onrender.com
+flutter build apk --release --dart-define=API_BASE_URL=https://campusmart-api-zia4.onrender.com
 # → frontend/build/app/outputs/flutter-apk/app-release.apk
 ```
 
@@ -229,7 +229,7 @@ Run top-to-bottom when shipping to production:
 2. **Render** — New → Blueprint → select the repo; Render provisions `campusmart-db` + `campusmart-api` from `render.yaml`.
 3. **Secrets** — paste when prompted (`sync: false`): `FIREBASE_SERVICE_ACCOUNT_KEY`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`.
 4. **Cloudinary** — dashboard → API Keys; confirm uploads land on the CDN (Render disks are ephemeral, so this is mandatory, not optional).
-5. **Health check** — `GET https://campusmart-api.onrender.com/` → `{"status": "CampusMart API is running"}`.
+5. **Health check** — `GET https://campusmart-api-zia4.onrender.com/` → `{"status": "CampusMart API is running"}`.
 6. **Seed** — `DATABASE_URL=<render-db-url> python seed_db.py` → feed shows the 8 demo listings.
 7. **Security** — confirm `AUTH_DEV_BYPASS=false` on the service (render.yaml default); real Firebase tokens only.
 8. **CORS** — pin `CORS_ORIGINS` to your Vercel domain once the web app is deployed.

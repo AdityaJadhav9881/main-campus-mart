@@ -54,7 +54,7 @@ class ApiService {
   static const String mockName = 'Demo Student';
 
   /// Compile-time base-URL override for deployed builds:
-  ///   flutter build web --release --dart-define=API_BASE_URL=https://campusmart-api.onrender.com
+  ///   flutter build web --release --dart-define=API_BASE_URL=https://campusmart-api-zia4.onrender.com
   /// When empty the platform heuristics below apply (localhost / emulator).
   static const String _apiBaseUrlOverride =
       String.fromEnvironment('API_BASE_URL');
