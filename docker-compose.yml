@@ -1,0 +1,56 @@
+# =============================================================================
+# CampusMart AI - Phase 1 :: Service Orchestration
+# -----------------------------------------------------------------------------
+# Purpose : Provision the PostgreSQL 15 datastore used by the FastAPI backend.
+#
+# Usage   : docker compose up -d        # start the DB in the background
+#           docker compose ps           # verify it is running/healthy
+#           docker compose logs -f      # tail database logs
+#           docker compose down         # stop container (data survives in volume)
+#           docker compose down -v      # stop AND DELETE data (destructive!)
+#
+# SECURITY NOTE : The credentials below are LOCAL DEVELOPMENT ONLY. They are
+#                 mirrored in /backend/.env (read by app/database.py) and must
+#                 be replaced with real secrets before any production deploy.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15 - primary relational database (users, products, transactions)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15                             # Official PostgreSQL 15 image
+    container_name: campusmart_postgres            # Fixed name for easy `docker exec` access
+    restart: unless-stopped                        # Auto-restart on crash/host reboot
+
+    ports:
+      # Host:container mapping. Bound to 127.0.0.1 so the database is only
+      # reachable from this machine (never exposed to the public network).
+      - "127.0.0.1:5432:5432"
+
+    environment:
+      # These three variables are consumed by the official postgres image on
+      # FIRST container boot to initialize the data directory.
+      POSTGRES_DB: campusmart                      # Default database name
+      POSTGRES_USER: admin                         # Application superuser
+      POSTGRES_PASSWORD: admin_password            # Dev-only password - change in prod!
+
+    volumes:
+      # Named volume keeps all database files across `docker compose down`.
+      # Only `docker compose down -v` destroys it.
+      - campusmart_pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      # Docker marks this service "healthy" only when PostgreSQL accepts connections.
+      # Backend startup logic can then wait on `depends_on: condition: service_healthy`.
+      test: ["CMD-SHELL", "pg_isready -U admin -d campusmart"]
+      interval: 10s                                # Check every 10 seconds
+      timeout: 5s                                  # A check may take at most 5s
+      retries: 5                                   # 5 consecutive failures => unhealthy
+      start_period: 10s                            # Grace period while PG initializes
+
+# ---------------------------------------------------------------------------
+# Named volumes (persisted outside the container filesystem)
+# ---------------------------------------------------------------------------
+volumes:
+  campusmart_pgdata:

@@ -1,0 +1,38 @@
+# =============================================================================
+# CampusMart AI - Backend Python dependencies (Phase 1)
+# -----------------------------------------------------------------------------
+# Install : pip install -r requirements.txt      (run from the /backend folder)
+# Python  : 3.10+
+#
+# Versions are intentionally unpinned during Phase 1 so the resolver can pick
+# the newest release compatible with your Python version. After the first
+# successful install, freeze exact versions for reproducible deploys with:
+#     pip freeze > requirements.lock.txt
+# =============================================================================
+
+# --- Web framework -----------------------------------------------------------
+fastapi
+uvicorn
+# Multipart form parsing for POST /products/upload-image/ (UploadFile/File)
+python-multipart
+
+# --- Database ----------------------------------------------------------------
+sqlalchemy
+psycopg2-binary
+
+# --- Authentication ----------------------------------------------------------
+firebase-admin
+# Local campus email/password JWT auth (Phase 7)
+PyJWT
+bcrypt
+
+# --- Cloud image storage (Cloudinary; local-disk fallback when unconfigured)
+cloudinary
+
+# --- AI / ML -----------------------------------------------------------------
+langgraph
+ultralytics
+scikit-learn
+
+# --- Configuration -----------------------------------------------------------
+python-dotenv

@@ -1,0 +1,32 @@
+# =============================================================================
+# CampusMart AI - Git ignore rules
+# -----------------------------------------------------------------------------
+
+# --- Secrets: NEVER commit these --------------------------------------------
+.env
+**/.env
+firebase-adminsdk.json
+**/firebase-adminsdk.json
+
+# --- Local image-upload fallback (Phase 6) - Cloudinary owns prod media ------
+backend/uploads/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Tooling / IDE -----------------------------------------------------------
+.idea/
+.vscode/
+*.log
+
+# --- Flutter / Dart (created by `flutter create` in Phase 1, Task 3) ---------
+frontend/.dart_tool/
+frontend/build/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/android/.gradle/
+frontend/ios/Pods/

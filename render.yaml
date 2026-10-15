@@ -1,0 +1,63 @@
+# =============================================================================
+# CampusMart AI - Render.com deployment blueprint (Phase 6)
+# -----------------------------------------------------------------------------
+# How to use (full checklist in README.md -> "Deploying to Render"):
+#   1. Push this repo to GitHub.
+#   2. Render dashboard -> New -> Blueprint -> pick the repo.
+#   3. Render reads THIS file, provisions the Postgres database + web service,
+#      and prompts for the sync:false secrets (Firebase + Cloudinary).
+#
+# Layout: this file lives at the repo root; the API code is under /backend.
+# =============================================================================
+
+databases:
+  # Managed PostgreSQL 15 - equivalent of the local docker-compose service.
+  - name: campusmart-db
+    databaseName: campusmart
+    user: campusmart
+    plan: free            # upgrade to starter/standard for real traffic
+    region: oregon
+
+services:
+  # FastAPI gateway - replaces `uvicorn app.main:app --reload` from local dev.
+  - type: web
+    name: campusmart-api
+    runtime: python
+    plan: free            # sleeps after inactivity on free tier (see README)
+    region: oregon
+    rootDir: backend      # run all commands from /backend
+
+    buildCommand: pip install -r requirements.txt
+    # Render sets $PORT per instance; uvicorn does not read it automatically.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Injected by Render from the campusmart-db resource above
+      # (postgresql://campusmart:...@....render.com/campusmart).
+      # app/database.py prefers DATABASE_URL automatically.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: campusmart-db
+          property: connectionString
+      # SECURITY: the dev bypass that accepts mock-* tokens MUST stay off
+      # in production - real Firebase tokens are verified.
+      - key: AUTH_DEV_BYPASS
+        value: "false"
+      # Web client origins (Flutter web / Vercel). "*" accepts any origin;
+      # pin your Vercel domain(s) once the frontend is deployed:
+      #   value: "https://campusmart.vercel.app"
+      - key: CORS_ORIGINS
+        value: "*"
+      # --- Secrets: set these in the Render dashboard (sync:false = prompt) ---
+      - key: FIREBASE_SERVICE_ACCOUNT_KEY
+        sync: false        # path or JSON; see app/auth.py
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+    healthCheckPath: /     # GET / -> {"status": "CampusMart API is running"}
