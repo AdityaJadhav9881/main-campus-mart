@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' show MediaType;
 
+import '../models/ai_analysis.dart';
+import '../models/chat_models.dart';
 import '../models/product.dart';
 import '../models/user_profile.dart';
 
@@ -17,6 +19,10 @@ class ApiException implements Exception {
   final String message;
   final int statusCode;
 
+  /// True for the canonical `ACCOUNT_TERMINATED: ...` 403 detail - the UI
+  /// raises its non-dismissible "Access Terminated" gate for this.
+  bool get isAccessTerminated => statusCode == 403 && message.startsWith('ACCOUNT_TERMINATED');
+
   @override
   String toString() => 'ApiException($statusCode): $message';
 }
@@ -25,17 +31,38 @@ class ApiException implements Exception {
 ///
 /// Responsibilities:
 ///  * Platform-aware base URL (Android emulator vs. everything else).
-///  * Mock-auth bypass flag for local testing without live Firebase.
+///  * 75s requests with a warm-start retry policy (Render free instances cold
+///    boot for 30-60s; GETs re-fire once, unsafe POSTs only on gateway errors).
 ///  * Uniform timeouts, JSON decoding, and error normalization.
+///  * `ACCOUNT_TERMINATED` signal ([accessTerminated]) for the blocked gate.
 class ApiService {
   ApiService._();
+
+  /// Shared keep-alive HTTP client (one per isolate).
+  static final http.Client _client = http.Client();
 
   /// App-wide singleton - stateless besides configuration.
   static final ApiService instance = ApiService._();
 
-  /// Every request waits at most this long before failing with a friendly
-  /// timeout message (keeps the UI resilient against a dead backend).
-  static const Duration timeout = Duration(seconds: 15);
+  /// Every request waits at most this long before failing. Render's cold
+  /// starts need well over the old 15s budget, so the app allows 75s and
+  /// auto-retries (see [_send]).
+  static const Duration timeout = Duration(seconds: 75);
+
+  /// Pause before the single automatic retry of a failed attempt.
+  static const Duration _retryDelay = Duration(milliseconds: 450);
+
+  /// HTTP statuses that indicate a transient gateway/wake-up failure worth
+  /// one automatic retry for every verb.
+  static const Set<int> _retryableStatuses = <int>{502, 503, 504};
+
+  /// Fires when the backend answers a request with the canonical blocked
+  /// 403 (`ACCOUNT_TERMINATED: ...`). Listened to by the app shell so the
+  /// non-dismissible "Access Terminated" gate can cover every screen.
+  static final ValueNotifier<bool> accessTerminated = ValueNotifier<bool>(false);
+
+  /// Clears the terminated gate (call on sign-out / fresh login).
+  static void clearAccessTerminated() => accessTerminated.value = false;
 
   /// ---------------------------------------------------------------------------
   /// PHASE 7: MOCK AUTH REMOVED — production uses real campus email/password
@@ -88,41 +115,101 @@ class ApiService {
   }
 
   // ---------------------------------------------------------------------------
-  // Transport helpers
+  // Transport helpers (75s budget + single warm-start retry)
   // ---------------------------------------------------------------------------
 
-  Future<http.Response> _get(String path, {String? token}) async {
-    try {
-      final uri = Uri.parse('$baseUrl$path');
-      return await http.get(uri, headers: _headers(token)).timeout(timeout);
-    } on Exception catch (error) {
-      throw ApiException(_friendlyTransport(error));
+  /// Runs [request] under the warm-start retry policy:
+  ///
+  ///  * **GET** - retried once on timeout, on 502/503/504, and on a refused
+  ///    connection (read-only, always safe; this is the Render cold-start path).
+  ///  * **POST/DELETE** - retried once only when the request verifiably never
+  ///    reached the app (refused connection) or the gateway failed it
+  ///    (502/503/504). A *timeout* is NOT retried for unsafe verbs so a slow
+  ///    success can never double-create a listing or purchase.
+  Future<http.Response> _send(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    String? token,
+  }) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final retryOnTimeout = method == 'GET';
+    final payload = body == null ? null : jsonEncode(body);
+
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final request = http.Request(method, uri)
+          ..headers.addAll(_headers(token));
+        if (payload != null) request.body = payload;
+        final streamed = await _client.send(request).timeout(timeout);
+        final response = await http.Response.fromStream(streamed);
+
+        if (attempt == 0 && _retryableStatuses.contains(response.statusCode)) {
+          await Future<void>.delayed(_retryDelay);
+          continue;
+        }
+        return response;
+      } on TimeoutException {
+        if (attempt == 0 && retryOnTimeout) {
+          await Future<void>.delayed(_retryDelay);
+          continue;
+        }
+        throw ApiException(_friendlyTimeout(method), statusCode: 408);
+      } on Exception catch (error) {
+        if (attempt == 0 && _isConnectionFailure(error)) {
+          await Future<void>.delayed(_retryDelay);
+          continue;
+        }
+        throw ApiException(_friendlyTransport(error));
+      }
     }
   }
+
+  Future<http.Response> _get(String path, {String? token}) =>
+      _send('GET', path, token: token);
 
   Future<http.Response> _post(
     String path, {
     required Map<String, dynamic> body,
     String? token,
-  }) async {
-    try {
-      final uri = Uri.parse('$baseUrl$path');
-      return await http
-          .post(uri, headers: _headers(token), body: jsonEncode(body))
-          .timeout(timeout);
-    } on Exception catch (error) {
-      throw ApiException(_friendlyTransport(error));
-    }
+  }) =>
+      _send('POST', path, body: body, token: token);
+
+  Future<http.Response> _delete(String path, {String? token}) =>
+      _send('DELETE', path, token: token);
+
+  /// True when [error] means the request never left the device (safe to
+  /// retry for any verb). Works cross-platform without importing dart:io.
+  static bool _isConnectionFailure(Object error) {
+    if (error is http.ClientException) return true;
+    final text = error.toString().toLowerCase();
+    return text.contains('connection refused') ||
+        text.contains('connection reset') ||
+        text.contains('failed host lookup') ||
+        text.contains('network is unreachable') ||
+        text.contains('connection closed');
   }
 
-  /// Turns low-level network failures into actionable developer messages.
+  /// Friendly timeout copy - deliberately free of server internals; students
+  /// only need to know the marketplace is waking up and to tap again.
+  String _friendlyTimeout(String method) {
+    if (method == 'GET') {
+      return 'Still waking up! The Campus Mart Ai marketplace can take up to '
+          'a minute to start on first launch - please try again in a few '
+          'seconds.';
+    }
+    return 'That took too long to reach the server. Please check your '
+        'connection and try again - do not resubmit yet if a listing or '
+        'purchase was in progress.';
+  }
+
+  /// Turns low-level network failures into actionable, student-safe messages.
   String _friendlyTransport(Object error) {
     if (error is TimeoutException) {
-      return 'Request timed out after ${timeout.inSeconds}s. '
-          'Is the backend running at $baseUrl?';
+      return _friendlyTimeout('GET');
     }
-    return 'Cannot reach the Campus Mart Ai API at $baseUrl. '
-        'Start it with: uvicorn app.main:app --reload';
+    return 'Cannot reach Campus Mart Ai right now. Check your internet '
+        'connection and try again.';
   }
 
   /// Extracts FastAPI's {"detail": "..."} error body (or a raw fallback).
@@ -137,7 +224,9 @@ class ApiService {
       // Non-JSON body (e.g. proxy HTML) -> keep the HTTP status fallback.
       detail = detail;
     }
-    return ApiException(detail, statusCode: response.statusCode);
+    final error = ApiException(detail, statusCode: response.statusCode);
+    if (error.isAccessTerminated) accessTerminated.value = true;
+    return error;
   }
 
   Map<String, dynamic> _decodeMap(http.Response response) {
@@ -157,14 +246,60 @@ class ApiService {
   // ---------------------------------------------------------------------------
 
   /// GET /products/ - public feed of active listings.
-  Future<List<Product>> fetchActiveProducts() async {
-    final response = await _get('/products/');
+  ///
+  /// Optional server-side search (added for the Discover search bar):
+  ///  * [query]  -> `?q=` title/description/category/tag ILIKE match.
+  ///  * [category] -> `?category=` exact category filter (skip "All").
+  Future<List<Product>> fetchActiveProducts({
+    String? query,
+    String? category,
+  }) async {
+    final params = <String, String>{};
+    final trimmedQuery = query?.trim() ?? '';
+    if (trimmedQuery.isNotEmpty) params['q'] = trimmedQuery;
+    final trimmedCategory = category?.trim() ?? '';
+    if (trimmedCategory.isNotEmpty && trimmedCategory != 'All') {
+      params['category'] = trimmedCategory;
+    }
+    final path = params.isEmpty
+        ? '/products/'
+        : '/products/?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
+    final response = await _get(path);
     if (response.statusCode != 200) throw _apiError(response);
     final items = _decodeList(response);
     return items
         .map((dynamic item) =>
             Product.fromJson(item! as Map<String, dynamic>))
         .toList();
+  }
+
+  /// POST /products/analyze-images - the 4-angle Vision AI inspection.
+  ///
+  /// JSON body (NOT multipart): the photos must already be uploaded through
+  /// [uploadListingImage] so [imageUrls] carries their CDN URLs. Fewer than
+  /// 4 URLs is rejected server-side with HTTP 400 and a clear message.
+  /// Returns the strict-JSON auto-fill for the Sell form.
+  Future<AiPhotoAnalysis> analyzeImages({
+    required List<String> imageUrls,
+    String? title,
+    String? description,
+    String? condition,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/products/analyze-images',
+      body: <String, dynamic>{
+        'image_urls': imageUrls,
+        if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
+        if (description != null && description.trim().isNotEmpty)
+          'description': description.trim(),
+        if (condition != null && condition.trim().isNotEmpty)
+          'condition': condition.trim(),
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return AiPhotoAnalysis.fromJson(_decodeMap(response));
   }
 
   /// POST /products/ - create a listing. The response contains the
@@ -199,27 +334,46 @@ class ApiService {
     required String filename,
     required String token,
   }) async {
-    try {
-      final uri = Uri.parse('$baseUrl/products/upload-image/');
-      final request = http.MultipartRequest('POST', uri)
-        ..headers['Authorization'] = 'Bearer ${_resolveToken(token)}'
-        ..files.add(
-          http.MultipartFile.fromBytes(
-            'file',
-            bytes,
-            filename: filename,
-            contentType: _imageMediaType(bytes, filename),
-          ),
-        );
+    // Multipart bodies are single-use, so each attempt rebuilds the request.
+    // Retry policy: once on a refused connection or 502/503/504 (the photo
+    // never landed) - never on timeout, since Cloudinary may hold a copy.
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final uri = Uri.parse('$baseUrl/products/upload-image/');
+        final request = http.MultipartRequest('POST', uri)
+          ..headers['Authorization'] = 'Bearer ${_resolveToken(token)}'
+          ..files.add(
+            http.MultipartFile.fromBytes(
+              'file',
+              bytes,
+              filename: filename,
+              contentType: _imageMediaType(bytes, filename),
+            ),
+          );
 
-      final streamed = await request.send().timeout(timeout);
-      final response = await http.Response.fromStream(streamed);
-      if (response.statusCode != 200) throw _apiError(response);
-      return _decodeMap(response)['image_url'] as String;
-    } on ApiException {
-      rethrow;
-    } on Exception catch (error) {
-      throw ApiException(_friendlyTransport(error));
+        final streamed = await _client.send(request).timeout(timeout);
+        final response = await http.Response.fromStream(streamed);
+        if (attempt == 0 && _retryableStatuses.contains(response.statusCode)) {
+          await Future<void>.delayed(_retryDelay);
+          continue;
+        }
+        if (response.statusCode != 200) throw _apiError(response);
+        return _decodeMap(response)['image_url'] as String;
+      } on ApiException {
+        rethrow;
+      } on TimeoutException {
+        throw ApiException(
+          'The photo upload took too long. Check your connection and retry '
+          'this photo.',
+          statusCode: 408,
+        );
+      } on Exception catch (error) {
+        if (attempt == 0 && _isConnectionFailure(error)) {
+          await Future<void>.delayed(_retryDelay);
+          continue;
+        }
+        throw ApiException(_friendlyTransport(error));
+      }
     }
   }
 
@@ -363,19 +517,127 @@ class ApiService {
     required String productId,
     required String token,
   }) async {
-    try {
-      final uri = Uri.parse('$baseUrl/products/$productId');
-      final response = await http
-          .delete(uri, headers: _headers(token))
-          .timeout(timeout);
-      if (response.statusCode != 204 && response.statusCode != 200) {
-        throw _apiError(response);
-      }
-    } on ApiException {
-      rethrow;
-    } on Exception catch (error) {
-      throw ApiException(_friendlyTransport(error));
+    final response = await _delete('/products/$productId', token: token);
+    if (response.statusCode != 204 && response.statusCode != 200) {
+      throw _apiError(response);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Task 4 - OTP signup (Brevo 6-digit email verification)
+  // ---------------------------------------------------------------------------
+
+  /// POST /auth/send-otp - step 1: park the signup + email a 6-digit code.
+  /// Throws 409 when the address already has an account.
+  Future<void> sendOtp({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final response = await _post(
+      '/auth/send-otp',
+      body: <String, dynamic>{
+        'name': name.trim(),
+        'email': email.trim(),
+        'password': password,
+      },
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+  }
+
+  /// POST /auth/verify-otp - step 2: validate the code, create the active
+  /// account, and adopt the returned JWT session (HTTP 201).
+  Future<AuthSession> verifyOtp({
+    required String email,
+    required String otpCode,
+  }) async {
+    final response = await _post(
+      '/auth/verify-otp',
+      body: <String, dynamic>{'email': email.trim(), 'otp_code': otpCode},
+    );
+    if (response.statusCode != 201) throw _apiError(response);
+    return AuthSession.fromJson(_decodeMap(response));
+  }
+
+  /// POST /auth/resend-otp - fresh code for a signup still on step 2.
+  Future<void> resendOtp({required String email}) async {
+    final response = await _post(
+      '/auth/resend-otp',
+      body: <String, dynamic>{'email': email.trim()},
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Task 5 - buyer-seller chat + Ask CampusMart AI
+  // ---------------------------------------------------------------------------
+
+  /// POST /chats/messages - send one message on a product thread (201).
+  Future<ChatMessage> sendMessage({
+    required String productId,
+    required String receiverId,
+    required String message,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/chats/messages',
+      body: <String, dynamic>{
+        'product_id': productId,
+        'receiver_id': receiverId,
+        'message': message,
+      },
+      token: token,
+    );
+    if (response.statusCode != 201) throw _apiError(response);
+    return ChatMessage.fromJson(_decodeMap(response));
+  }
+
+  /// GET /chats/conversations - my inbox threads, newest first.
+  Future<List<Conversation>> fetchConversations({required String token}) async {
+    final response = await _get('/chats/conversations', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeList(response)
+        .map((dynamic row) =>
+            Conversation.fromJson(row! as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// GET /chats/messages/{product_id}/{other_user_id} - full thread history
+  /// (opening it also clears the receiver's unread badge server-side).
+  Future<List<ChatMessage>> fetchThreadMessages({
+    required String productId,
+    required String otherUserId,
+    required String token,
+  }) async {
+    final response = await _get(
+      '/chats/messages/${Uri.encodeComponent(productId)}/'
+      '${Uri.encodeComponent(otherUserId)}',
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeList(response)
+        .map((dynamic row) =>
+            ChatMessage.fromJson(row! as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// POST /ai/chat - Ask CampusMart AI. Falls back to the catalog-aware
+  /// local assistant (source='catalog') when no live LLM is configured.
+  Future<AiChatReply> askAi({
+    required String message,
+    List<AiChatTurn> history = const <AiChatTurn>[],
+    String? token,
+  }) async {
+    final response = await _post(
+      '/ai/chat',
+      body: <String, dynamic>{
+        'message': message,
+        'history': history.map((turn) => turn.toJson()).toList(),
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return AiChatReply.fromJson(_decodeMap(response));
   }
 }
 

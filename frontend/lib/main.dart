@@ -1,13 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'providers/auth_provider.dart';
 import 'providers/product_provider.dart';
 import 'providers/wishlist_provider.dart';
+import 'screens/ai_assistant_screen.dart';
 import 'screens/auth_screen.dart';
 import 'screens/create_listing_screen.dart';
 import 'screens/feed_screen.dart';
+import 'screens/messages_screen.dart';
 import 'screens/profile_screen.dart';
+import 'services/api_service.dart';
 import 'widgets/app_theme.dart';
 
 void main() {
@@ -15,8 +21,9 @@ void main() {
 }
 
 /// Root application widget: registers the providers and applies the dark
-/// "deep void" theme. Phase 7 gates the shell behind real campus auth —
-/// logged-out users see AuthScreen; logged-in users get the 3-tab shell.
+/// "deep void" theme. The shell gates behind real campus auth - logged-out
+/// users see AuthScreen; logged-in users get the 5-tab shell (with the
+/// blocked-account and cold-start overlays layered on top).
 class CampusMartApp extends StatelessWidget {
   const CampusMartApp({super.key});
 
@@ -50,35 +57,232 @@ class CampusMartApp extends StatelessWidget {
   }
 }
 
-/// Watches the session and swaps between AuthScreen and the tab shell.
-class _AuthGate extends StatelessWidget {
+/// Watches the session and swaps between AuthScreen and the tab shell, and
+/// stacks the two cross-cutting gates on top:
+///  * **Boot warmup** - after 3s of a slow restore, show the honest
+///    "Connecting to Campus Mart Ai" card instead of an endless spinner.
+///  * **Access terminated** - any `ACCOUNT_TERMINATED` 403 flips
+///    [ApiService.accessTerminated] and this non-dismissible gate covers
+///    every screen until the student signs out.
+class _AuthGate extends StatefulWidget {
   const _AuthGate();
+
+  @override
+  State<_AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<_AuthGate> {
+  Timer? _bootWarmupTimer;
+  bool _bootWarmupVisible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootWarmupTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      final auth = context.read<AuthProvider>();
+      if (auth.isRestoring) setState(() => _bootWarmupVisible = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _bootWarmupTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
 
-    if (auth.isRestoring) {
-      return const Scaffold(
-        backgroundColor: AppColors.voidBlack,
-        body: Center(
-          child: CircularProgressIndicator(color: AppColors.cyanAccent),
-        ),
-      );
-    }
+    return ValueListenableBuilder<bool>(
+      valueListenable: ApiService.accessTerminated,
+      builder: (context, terminated, _) {
+        if (terminated) return const _AccessTerminatedGate();
 
-    if (!auth.isLoggedIn) {
-      return const AuthScreen();
-    }
+        if (auth.isRestoring) {
+          return _bootWarmupVisible
+              ? const _BootWarmupCard()
+              : const Scaffold(
+                  backgroundColor: AppColors.voidBlack,
+                  body: Center(
+                    child:
+                        CircularProgressIndicator(color: AppColors.cyanAccent),
+                  ),
+                );
+        }
 
-    return const MainNavigationShell();
+        if (!auth.isLoggedIn) return const AuthScreen();
+        return const MainNavigationShell();
+      },
+    );
   }
 }
 
-/// Three-tab navigation shell (spec Task 5):
+/// Full-screen takeover for blocked accounts. Not dismissible (covers every
+/// tab, no back navigation); the only way out is signing out or exiting.
+/// Full-screen takeover for blocked accounts. Not dismissible (covers every
+/// tab, no back navigation); the only way out is signing out or exiting.
+class _AccessTerminatedGate extends StatelessWidget {
+  const _AccessTerminatedGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        backgroundColor: AppColors.background,
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    width: 72,
+                    height: 72,
+                    decoration: BoxDecoration(
+                      color: AppColors.danger.withOpacity(0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.gpp_bad_outlined,
+                      size: 40,
+                      color: AppColors.danger,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Access Terminated',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: 'Georgia',
+                      color: AppColors.inkBlack,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Your access has been terminated by Administration. '
+                    'For assistance or appeals, contact martaicampus@gmail.com.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 14.5,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.hairline),
+                    ),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.mail_outline, size: 18, color: AppColors.royalBlue),
+                        SizedBox(width: 8),
+                        SelectableText(
+                          'martaicampus@gmail.com',
+                          style: TextStyle(
+                            color: AppColors.royalBlue,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  FilledButton(
+                    onPressed: () => context.read<AuthProvider>().logout(),
+                    child: const Text('Exit & Sign Out'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () => SystemNavigator.pop(),
+                    child: const Text(
+                      'Close Application',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Cold-boot card (>3s restore) - warm paper aesthetic.
+class _BootWarmupCard extends StatelessWidget {
+  const _BootWarmupCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: AppColors.background,
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 36),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3.5,
+                  color: AppColors.royalBlue,
+                ),
+              ),
+              SizedBox(height: 24),
+              Text(
+                'Connecting to Campus Mart Ai Marketplace',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontFamily: 'Georgia',
+                  color: AppColors.inkBlack,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              SizedBox(height: 10),
+              Text(
+                'Hang tight! Waking up our cloud AI server (takes ~30-60 '
+                'seconds on first launch)...',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AppColors.textMuted,
+                  fontSize: 13,
+                  height: 1.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Five-tab navigation shell (Task 5):
 ///  0. Discovery Feed
 ///  1. Sell / Create Listing
-///  2. Profile & Campus Trust
+///  2. Ask CampusMart AI
+///  3. Messages (buyer-seller chat)
+///  4. Profile & Campus Trust
 class MainNavigationShell extends StatefulWidget {
   const MainNavigationShell({super.key});
 
@@ -100,6 +304,8 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
       const FeedScreen(),
       // After a successful listing the shell jumps back to the feed tab.
       CreateListingScreen(onListingCreated: _showFeedTab),
+      const AiAssistantScreen(),
+      const MessagesScreen(),
       const ProfileScreen(),
     ];
   }
@@ -126,6 +332,16 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
             icon: Icon(Icons.add_box_outlined),
             activeIcon: Icon(Icons.add_box),
             label: 'Sell',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.auto_awesome_outlined),
+            activeIcon: Icon(Icons.auto_awesome),
+            label: 'Ask AI',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.chat_bubble_outline),
+            activeIcon: Icon(Icons.chat_bubble),
+            label: 'Messages',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.person_outline),

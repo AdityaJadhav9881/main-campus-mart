@@ -24,10 +24,24 @@ from .state import ProductState
 # ---------------------------------------------------------------------------
 # MOCK pricing table (replace with the trained regressor in a later phase)
 # ---------------------------------------------------------------------------
-BASE_MOCK_PRICE = 100.0
+# All amounts are INDIAN RUPEES (₹) - the marketplace prices exclusively in
+# INR (Task 7). `BASE_MOCK_PRICE` is the default category base; the per-
+# category table below keeps a used textbook around ₹250-450 while still
+# leaving room for gadgets.
+BASE_MOCK_PRICE = 500.0
 
-# Multiplier applied to BASE_MOCK_PRICE per declared condition.
-# Spec example: "Like New" -> 80% of the base mock value (= 80.0).
+# Category -> fair-value base in ₹ BEFORE the condition factor. Keep in sync
+# with the client mirror (frontend/lib/services/ai_price_estimate.dart).
+CATEGORY_BASE_PRICE_INR: dict[str, float] = {
+    "Electronics": 1500.0,
+    "Academic Material": 500.0,
+    "Lab Gear & Instruments": 600.0,
+    "Stationery": 100.0,
+    "Hostel & Lifestyle": 400.0,
+}
+
+# Multiplier applied to the category base per declared condition.
+# "Like New" -> 80% of the base, "Good" -> 60%, and so on.
 CONDITION_FACTORS = {
     "new": 1.00,
     "like new": 0.80,
@@ -40,8 +54,15 @@ CONDITION_FACTORS = {
 _DEFAULT_FACTOR = 0.50
 
 
+def base_price_for(category: str | None) -> float:
+    """₹ fair-value base for a marketplace category (unknown -> default)."""
+    if not category:
+        return BASE_MOCK_PRICE
+    return CATEGORY_BASE_PRICE_INR.get(category.strip(), BASE_MOCK_PRICE)
+
+
 def price_agent(state: ProductState) -> dict:
-    """Node: compute the AI suggested price.
+    """Node: compute the AI suggested price (INR).
 
     Args:
         state: Current ProductState (condition + category already extracted).
@@ -55,6 +76,6 @@ def price_agent(state: ProductState) -> dict:
     condition = state["condition"].strip().lower()
     factor = CONDITION_FACTORS.get(condition, _DEFAULT_FACTOR)
 
-    suggested_price = round(BASE_MOCK_PRICE * factor, 2)
+    suggested_price = round(base_price_for(state.get("extracted_category")) * factor, 2)
 
     return {"suggested_price": suggested_price}

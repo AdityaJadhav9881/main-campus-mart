@@ -21,12 +21,48 @@ same, so the orchestrator needs no changes.
 from .state import ProductState
 
 # Categories the marketplace supports (kept explicit so downstream UI can
-# render a fixed filter list).
+# render a fixed filter list). Matches the vision engine's vocabulary
+# (vision_master.VALID_CATEGORIES) so POST /products/analyze-images and the
+# feed chips always agree.
 CATEGORY_ACADEMIC = "Academic Material"
 CATEGORY_ELECTRONICS = "Electronics"
+CATEGORY_LAB = "Lab Gear & Instruments"
+CATEGORY_STATIONERY = "Stationery"
+CATEGORY_HOSTEL = "Hostel & Lifestyle"
+CATEGORY_OTHER = "Other"
 
-# Title keywords that identify books / course material.
-_ACADEMIC_KEYWORDS = ("book", "math")
+# First match wins: specific buckets are checked BEFORE the generic ones so
+# "engineering lab notebook" lands in Stationery rather than Electronics.
+_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        CATEGORY_ACADEMIC,
+        ("book", "textbook", "math", "notes", "manual", "guide", "dictionary",
+         "edition", "semester", "syllabus", "reference"),
+    ),
+    (
+        CATEGORY_LAB,
+        ("multimeter", "drafter", "oscilloscope", "solder", "lab", "protractor",
+         "vernier", "calliper", "caliper", "microscope", "instrument", "sensor",
+         "breadboard", "power supply", "optical"),
+    ),
+    (
+        CATEGORY_STATIONERY,
+        ("pen", "pencil", "marker", "highlighter", "refill", "sticky", "geometry",
+         "eraser", "sharpener", "file", "folder", "stapler", "scale", "ruler"),
+    ),
+    (
+        CATEGORY_HOSTEL,
+        ("bedsheet", "pillow", "mug", "lamp", "hostel", "curtain", "mattress",
+         "bucket", "fan", "mat", "hanger", "cupboard"),
+    ),
+    (
+        CATEGORY_ELECTRONICS,
+        ("laptop", "phone", "calculator", "speaker", "headphone", "earbud",
+         "camera", "watch", "drone", "esp32", "arduino", "raspberry", "chip",
+         "battery", "charger", "monitor", "keyboard", "mouse", "tablet",
+         "electronics", "bluetooth", "wifi", "usb", "projector", "tv"),
+    ),
+)
 
 
 def listing_agent(state: ProductState) -> dict:
@@ -41,12 +77,14 @@ def listing_agent(state: ProductState) -> dict:
     # ---- MOCK / heuristic implementation ------------------------------------
     # TODO(Phase 3 real models): replace with
     #   detections = model(state["image_url"])       # YOLOv8 .pt inference
-    #   + embedding_classifier(state["title"] + " " + state["description"])
-    title_lower = state["title"].lower()
-    if any(keyword in title_lower for keyword in _ACADEMIC_KEYWORDS):
-        category = CATEGORY_ACADEMIC
-    else:
-        category = CATEGORY_ELECTRONICS
+    #   + embedding_classifier(state["title"] + state["description"])
+    haystack = f"{state['title']} {state.get('description', '')}".lower()
+
+    category = CATEGORY_OTHER  # broad browse bucket when nothing matches
+    for candidate, keywords in _CATEGORY_KEYWORDS:
+        if any(keyword in haystack for keyword in keywords):
+            category = candidate
+            break
 
     # LangGraph nodes return partial state; the reducer merges this key.
     return {"extracted_category": category}

@@ -35,3 +35,7 @@ os.environ["DATABASE_URL"] = ""
 
 # Admin routes stay open (the React dashboard default) during tests.
 os.environ["ADMIN_REQUIRE_AUTH"] = "false"
+
+# Brevo transactional emails (OTP / listing / sold) must NEVER hit the real
+# API from pytest - an empty key makes email_service skip the HTTP call.
+os.environ["BREVO_API_KEY"] = ""

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/auth_provider.dart';
@@ -12,6 +15,12 @@ import '../widgets/app_theme.dart';
 ///   * A positive "Campus email detected" badge appears for known campus
 ///     TLDs: .edu, .ac.in, .edu.in, .org — purely informational, never a
 ///     hard block.
+///
+/// Sign-up is now a **2-step email OTP flow** (Task 4):
+///   Step 1 - name / email / password -> POST /auth/send-otp mails a 6-digit
+///            code (Brevo) and parks the signup for 10 minutes.
+///   Step 2 - enter the code -> POST /auth/verify-otp creates the account
+///            and signs the student straight in. Resend unlocks after 30s.
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
 
@@ -19,14 +28,30 @@ class AuthScreen extends StatefulWidget {
   State<AuthScreen> createState() => _AuthScreenState();
 }
 
+enum _SignupStep { details, otp }
+
 class _AuthScreenState extends State<AuthScreen> {
   final _formKey = GlobalKey<FormState>();
+  final _otpFormKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _otpController = TextEditingController();
 
   bool _isLoginMode = true;
   bool _obscurePassword = true;
+
+  /// Step 2 (code entry) only exists while signing up.
+  _SignupStep _signupStep = _SignupStep.details;
+
+  /// Resend cooldown (30s) after every issued code.
+  int _resendSeconds = 0;
+  Timer? _resendTimer;
+
+  /// Warm-up card shown if a login attempt is still pending after 3s
+  /// (Render cold start) - reassured progress, no server internals.
+  Timer? _warmupTimer;
+  bool _warmupVisible = false;
 
   /// Campus TLDs that earn the positive visual indicator (never a gate).
   static const List<String> _campusTlds = [
@@ -38,9 +63,12 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   void dispose() {
+    _resendTimer?.cancel();
+    _warmupTimer?.cancel();
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _otpController.dispose();
     super.dispose();
   }
 
@@ -62,24 +90,74 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Future<void> _submit() async {
-    final form = _formKey.currentState;
-    if (form == null || !form.validate()) return;
-
     final auth = context.read<AuthProvider>();
     final messenger = ScaffoldMessenger.of(context);
 
+    // Step 2: verify the 6-digit code, then the session is live.
+    if (!_isLoginMode && _signupStep == _SignupStep.otp) {
+      final otpForm = _otpFormKey.currentState;
+      if (otpForm == null || !otpForm.validate()) return;
+      final ok = await auth.verifyOtp(
+        email: _emailController.text.trim(),
+        otpCode: _otpController.text.trim(),
+      );
+      if (!mounted) return;
+      if (ok) {
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.success.withOpacity(0.92),
+            content: const Text(
+              'Account created — happy trading!',
+              style: TextStyle(
+                color: Colors.black,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final form = _formKey.currentState;
+    if (form == null || !form.validate()) return;
+
     final bool ok;
     if (_isLoginMode) {
+      _startWarmup();
       ok = await auth.login(
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
+      _stopWarmup();
     } else {
-      ok = await auth.register(
+      // Step 1: park the signup and email the code (Brevo).
+      ok = await auth.sendOtp(
         name: _nameController.text.trim(),
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
+      if (!mounted) return;
+      if (ok) {
+        setState(() {
+          _signupStep = _SignupStep.otp;
+          _otpController.clear();
+        });
+        _startResendCooldown();
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
+            content: Text(
+              'Verification code sent to ${_emailController.text.trim()}',
+              style: const TextStyle(
+                color: Colors.black,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        );
+      }
+      return;
     }
 
     if (!mounted) return;
@@ -87,9 +165,9 @@ class _AuthScreenState extends State<AuthScreen> {
       messenger.showSnackBar(
         SnackBar(
           backgroundColor: AppColors.success.withOpacity(0.92),
-          content: Text(
-            _isLoginMode ? 'Welcome back!' : 'Account created — happy trading!',
-            style: const TextStyle(
+          content: const Text(
+            'Welcome back!',
+            style: TextStyle(
               color: Colors.black,
               fontWeight: FontWeight.w700,
             ),
@@ -99,10 +177,77 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  /// 30-second resend lockout restarted after every issued OTP.
+  void _startResendCooldown() {
+    _resendTimer?.cancel();
+    setState(() => _resendSeconds = 30);
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_resendSeconds <= 1) {
+        timer.cancel();
+        setState(() => _resendSeconds = 0);
+      } else {
+        setState(() => _resendSeconds -= 1);
+      }
+    });
+  }
+
+  Future<void> _resendCode() async {
+    if (_resendSeconds > 0) return;
+    final auth = context.read<AuthProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    final ok = await auth.resendOtp(email: _emailController.text.trim());
+    if (!mounted) return;
+    if (ok) {
+      _startResendCooldown();
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
+          content: const Text(
+            'New verification code sent — check your inbox.',
+            style: TextStyle(
+              color: Colors.black,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      );
+    }
+  }
+
+  void _startWarmup() {
+    _warmupTimer?.cancel();
+    _warmupVisible = false;
+    _warmupTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      if (context.read<AuthProvider>().isLoading) {
+        setState(() => _warmupVisible = true);
+      }
+    });
+  }
+
+  void _stopWarmup() {
+    _warmupTimer?.cancel();
+    if (_warmupVisible && mounted) setState(() => _warmupVisible = false);
+  }
+
+  void _backToDetails() {
+    _resendTimer?.cancel();
+    setState(() {
+      _signupStep = _SignupStep.details;
+      _otpController.clear();
+      _resendSeconds = 0;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     final campusDetected = _isCampusEmail(_emailController.text);
+    final otpStep = !_isLoginMode && _signupStep == _SignupStep.otp;
 
     return Scaffold(
       body: SafeArea(
@@ -116,77 +261,19 @@ class _AuthScreenState extends State<AuthScreen> {
                 children: [
                   const _Header(),
                   const SizedBox(height: 28),
-                  _ModeToggle(
-                    isLogin: _isLoginMode,
-                    onChanged: (login) => setState(() => _isLoginMode = login),
-                  ),
-                  const SizedBox(height: 22),
-                  Form(
-                    key: _formKey,
-                    child: Column(
-                      children: [
-                        if (!_isLoginMode) ...[
-                          _TextFormField(
-                            controller: _nameController,
-                            label: 'Full name',
-                            icon: Icons.person_outline,
-                            validator: (value) =>
-                                (value == null || value.trim().isEmpty)
-                                    ? 'Enter your name'
-                                    : null,
-                          ),
-                          const SizedBox(height: 14),
-                        ],
-                        _TextFormField(
-                          controller: _emailController,
-                          label: 'College email',
-                          icon: Icons.email_outlined,
-                          keyboardType: TextInputType.emailAddress,
-                          onChanged: (_) => setState(() {}),
-                          validator: (value) {
-                            final email = value?.trim() ?? '';
-                            if (email.isEmpty) return 'Enter your email';
-                            if (!_isValidEmail(email)) {
-                              return 'Enter a valid email (e.g. you@college.edu)';
-                            }
-                            return null;
-                          },
-                        ),
-                        // Positive campus-domain indicator (informational).
-                        if (campusDetected) ...[
-                          const SizedBox(height: 8),
-                          const _CampusBadge(),
-                        ],
-                        const SizedBox(height: 14),
-                        _TextFormField(
-                          controller: _passwordController,
-                          label: 'Password',
-                          icon: Icons.lock_outline,
-                          obscure: _obscurePassword,
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscurePassword
-                                  ? Icons.visibility_off_outlined
-                                  : Icons.visibility_outlined,
-                              size: 20,
-                              color: AppColors.textMuted,
-                            ),
-                            onPressed: () => setState(
-                              () => _obscurePassword = !_obscurePassword,
-                            ),
-                          ),
-                          validator: (value) {
-                            final password = value ?? '';
-                            if (password.isEmpty) return 'Enter your password';
-                            if (!_isLoginMode && password.length < 8) {
-                              return 'Password must be at least 8 characters';
-                            }
-                            return null;
-                          },
-                        ),
-                      ],
+                  if (!otpStep)
+                    _ModeToggle(
+                      isLogin: _isLoginMode,
+                      onChanged: (login) => setState(() {
+                        _isLoginMode = login;
+                        if (login) _backToDetails();
+                      }),
                     ),
-                  ),
+                  const SizedBox(height: 22),
+                  if (otpStep)
+                    _buildOtpStep()
+                  else
+                    _buildDetailsForm(campusDetected),
                   if (auth.errorMessage != null) ...[
                     const SizedBox(height: 14),
                     Container(
@@ -217,11 +304,53 @@ class _AuthScreenState extends State<AuthScreen> {
                             height: 20,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: Colors.black,
+                              color: Colors.white,
                             ),
                           )
-                        : Text(_isLoginMode ? 'Log In' : 'Create Account'),
+                        : Text(
+                            otpStep
+                                ? 'Verify Code'
+                                : (_isLoginMode ? 'Log In' : 'Create Account'),
+                          ),
                   ),
+                  // Cold-start reassurance while a login is still pending.
+                  if (_warmupVisible && auth.isLoading) ...[
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.surface,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: AppColors.royalBlue.withOpacity(0.35),
+                        ),
+                      ),
+                      child: const Column(
+                        children: [
+                          Text(
+                            'Connecting to Campus Mart Ai Marketplace',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          SizedBox(height: 6),
+                          Text(
+                            'Hang tight! Waking up our cloud AI server '
+                            '(takes ~30-60 seconds on first launch)...',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 12,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   const Text(
                     'Trade second-hand campus gear with verified students. '
@@ -233,12 +362,195 @@ class _AuthScreenState extends State<AuthScreen> {
                       height: 1.45,
                     ),
                   ),
+                  const SizedBox(height: 14),
+                  Center(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        Clipboard.setData(
+                          const ClipboardData(text: 'martaicampus@gmail.com'),
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Support email copied: martaicampus@gmail.com',
+                            ),
+                          ),
+                        );
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        child: Text(
+                          'Need help signing in? Contact martaicampus@gmail.com',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: AppColors.royalBlue,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Step 1 fields (name / college email / password) for login + signup.
+  Widget _buildDetailsForm(bool campusDetected) {
+    return Form(
+      key: _formKey,
+      child: Column(
+        children: [
+          if (!_isLoginMode) ...[
+            _TextFormField(
+              controller: _nameController,
+              label: 'Full name',
+              icon: Icons.person_outline,
+              validator: (value) =>
+                  (value == null || value.trim().isEmpty)
+                      ? 'Enter your name'
+                      : null,
+            ),
+            const SizedBox(height: 14),
+          ],
+          _TextFormField(
+            controller: _emailController,
+            label: 'College email',
+            icon: Icons.email_outlined,
+            keyboardType: TextInputType.emailAddress,
+            onChanged: (_) => setState(() {}),
+            validator: (value) {
+              final email = value?.trim() ?? '';
+              if (email.isEmpty) return 'Enter your email';
+              if (!_isValidEmail(email)) {
+                return 'Enter a valid email (e.g. you@college.edu)';
+              }
+              return null;
+            },
+          ),
+          // Positive campus-domain indicator (informational).
+          if (campusDetected) ...[
+            const SizedBox(height: 8),
+            const _CampusBadge(),
+          ],
+          const SizedBox(height: 14),
+          _TextFormField(
+            controller: _passwordController,
+            label: 'Password',
+            icon: Icons.lock_outline,
+            obscure: _obscurePassword,
+            suffixIcon: IconButton(
+              icon: Icon(
+                _obscurePassword
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 20,
+                color: AppColors.textMuted,
+              ),
+              onPressed: () => setState(
+                () => _obscurePassword = !_obscurePassword,
+              ),
+            ),
+            validator: (value) {
+              final password = value ?? '';
+              if (password.isEmpty) return 'Enter your password';
+              if (!_isLoginMode && password.length < 8) {
+                return 'Password must be at least 8 characters';
+              }
+              return null;
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Step 2: the 6-digit code box + resend cooldown + back link.
+  Widget _buildOtpStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextButton.icon(
+          onPressed: _backToDetails,
+          icon: const Icon(Icons.arrow_back, size: 16, color: AppColors.textMuted),
+          label: const Text(
+            'Back to sign up details',
+            style: TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'We emailed a 6-digit code to\n${_emailController.text.trim()}',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 14.5,
+            height: 1.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'It expires in 10 minutes. Check spam if you do not see it.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textMuted,
+            fontSize: 12,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 18),
+        Form(
+          key: _otpFormKey,
+          child: _TextFormField(
+            controller: _otpController,
+            label: 'Verification code',
+            icon: Icons.pin_outlined,
+            keyboardType: TextInputType.number,
+            maxLength: 6,
+            validator: (value) {
+              final code = (value ?? '').trim();
+              if (code.isEmpty) return 'Enter the 6-digit code';
+              if (!RegExp(r'^\d{6}$').hasMatch(code)) {
+                return 'Enter the 6 digits from your email';
+              }
+              return null;
+            },
+          ),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: _resendSeconds > 0
+              ? Text(
+                  'Resend code in ${_resendSeconds}s',
+                  style: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                )
+              : TextButton(
+                  onPressed: _resendCode,
+                  child: const Text(
+                    'Resend code',
+                    style: TextStyle(
+                      color: AppColors.cyanAccent,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+        ),
+      ],
     );
   }
 }
@@ -255,25 +567,34 @@ class _Header extends StatelessWidget {
           height: 96,
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
-            color: AppColors.cyanAccent.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(26),
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(24),
             border: Border.all(
-              color: AppColors.cyanAccent.withOpacity(0.45),
+              color: AppColors.hairline,
+              width: 1.2,
             ),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0C000000),
+                blurRadius: 10,
+                offset: Offset(0, 4),
+              ),
+            ],
           ),
           child: const Image(
             image: AssetImage('assets/logo.png'),
             fit: BoxFit.cover,
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 18),
         const Text(
           'Campus Mart Ai',
           style: TextStyle(
-            color: AppColors.textPrimary,
-            fontSize: 26,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.4,
+            fontFamily: 'Georgia',
+            color: AppColors.inkBlack,
+            fontSize: 28,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.5,
           ),
         ),
         const SizedBox(height: 6),
@@ -341,14 +662,14 @@ class _ToggleChip extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 11),
           decoration: BoxDecoration(
-            color: selected ? AppColors.cyanAccent : Colors.transparent,
+            color: selected ? AppColors.inkBlack : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
           ),
           child: Text(
             label,
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: selected ? Colors.black : AppColors.textMuted,
+              color: selected ? Colors.white : AppColors.textMuted,
               fontWeight: FontWeight.w700,
               fontSize: 13.5,
             ),
@@ -395,6 +716,7 @@ class _TextFormField extends StatelessWidget {
     this.suffixIcon,
     this.onChanged,
     this.validator,
+    this.maxLength,
   });
 
   final TextEditingController controller;
@@ -405,6 +727,7 @@ class _TextFormField extends StatelessWidget {
   final Widget? suffixIcon;
   final ValueChanged<String>? onChanged;
   final String? Function(String?)? validator;
+  final int? maxLength;
 
   @override
   Widget build(BuildContext context) {
@@ -414,12 +737,14 @@ class _TextFormField extends StatelessWidget {
       obscureText: obscure,
       onChanged: onChanged,
       validator: validator,
+      maxLength: maxLength,
       style: const TextStyle(
         color: AppColors.textPrimary,
         fontSize: 14.5,
       ),
       decoration: InputDecoration(
         labelText: label,
+        counterText: maxLength != null ? '' : null,
         labelStyle: const TextStyle(color: AppColors.textMuted),
         prefixIcon: Icon(icon, size: 20, color: AppColors.cyanAccent),
         suffixIcon: suffixIcon,

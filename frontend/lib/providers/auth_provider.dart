@@ -141,11 +141,82 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Task 4 - 2-step email OTP signup (Brevo verification code)
+  // ---------------------------------------------------------------------------
+
+  /// Step 1 - park the signup and have the 6-digit code emailed.
+  Future<bool> sendOtp({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    _isLoading = true;
+    _errorMessage = null;
+    notifyListeners();
+    try {
+      await _api.sendOtp(name: name, email: email, password: password);
+      return true;
+    } on ApiException catch (error) {
+      _errorMessage = error.message;
+      return false;
+    } catch (error) {
+      _errorMessage = 'Could not send the code: $error';
+      return false;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Step 2 - verify the code, then adopt the JWT session it returns.
+  Future<bool> verifyOtp({
+    required String email,
+    required String otpCode,
+  }) async {
+    _isLoading = true;
+    _errorMessage = null;
+    notifyListeners();
+    try {
+      final session = await _api.verifyOtp(email: email, otpCode: otpCode);
+      await _adoptSession(session);
+      return true;
+    } on ApiException catch (error) {
+      _errorMessage = error.message;
+      return false;
+    } catch (error) {
+      _errorMessage = 'Verification failed: $error';
+      return false;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Fresh code for a signup still waiting on step 2 (server also re-emails).
+  Future<bool> resendOtp({required String email}) async {
+    _errorMessage = null;
+    try {
+      await _api.resendOtp(email: email);
+      notifyListeners();
+      return true;
+    } on ApiException catch (error) {
+      _errorMessage = error.message;
+      notifyListeners();
+      return false;
+    } catch (error) {
+      _errorMessage = 'Could not resend the code: $error';
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<void> logout() async {
     _token = '';
     _profile = null;
     _isLoggedIn = false;
     _errorMessage = null;
+    ApiService.clearAccessTerminated();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(_tokenKey);
@@ -166,6 +237,7 @@ class AuthProvider extends ChangeNotifier {
     _token = session.accessToken;
     _profile = session.user;
     _isLoggedIn = true;
+    ApiService.clearAccessTerminated();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, session.accessToken);
     await _persistProfile(session.user);

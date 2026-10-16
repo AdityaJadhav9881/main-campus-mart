@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Deliberately permissive pattern - the real address-verification/sign-up
 # flow lives in Firebase Auth, not here.
@@ -114,6 +114,35 @@ class ProductCreate(BaseModel):
         description="URL of the listing photo (consumed by the YOLO pricing "
                     "pipeline in Phase 3).",
     )
+    image_urls: list[str] | None = Field(
+        default=None,
+        max_length=16,
+        description="Every photo of the item (front, back, side, "
+                    "label/close-up + extras). `image_url` remains the front "
+                    "cover for backward compatibility; when omitted the "
+                    "server falls back to [image_url].",
+    )
+    ai_tags: str | None = Field(
+        default=None,
+        max_length=600,
+        description="Comma-separated AI search keywords (brand, synonyms, "
+                    "object type) produced by POST /products/analyze-images.",
+    )
+    ai_condition_notes: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="AI 4-angle inspection summary produced by POST "
+                    "/products/analyze-images.",
+    )
+    ai_suggested_price: float | None = Field(
+        default=None,
+        gt=0,
+        le=10_000_000,
+        description="Fair value (INR) produced by POST /products/analyze-images. "
+                    "When present and sane vs the asking price, it replaces the "
+                    "blind price-agent estimate - the vision model actually saw "
+                    "the item. Omit to let the LangGraph price agent decide.",
+    )
     listed_price: float = Field(
         ...,
         gt=0,
@@ -133,6 +162,21 @@ class ProductRead(BaseModel):
     category: str
     condition: str
     image_url: str
+    image_urls: list[str] | None = Field(
+        default=None,
+        description="All photos (front/back/side/label). Always populated on "
+                    "read: rows created before the 4-angle upgrade fall back "
+                    "to [image_url].",
+    )
+    ai_tags: str | None = Field(
+        default=None,
+        description="Comma-separated AI search keywords for "
+                    "GET /products/?q= visual/semantic search.",
+    )
+    ai_condition_notes: str | None = Field(
+        default=None,
+        description="AI inspection summary across all 4 photo angles.",
+    )
     suggested_price: float | None = Field(
         default=None,
         description="AI fair-value estimate. Null until the Phase 3 LangGraph "
@@ -159,6 +203,18 @@ class ProductRead(BaseModel):
                     "was flagged; null for clean listings.",
     )
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _backfill_image_urls(self) -> "ProductRead":
+        """Guarantee a non-null gallery for pre-upgrade rows.
+
+        Listings created before the 4-angle feature have `image_urls = NULL`;
+        mirroring the front cover here means the Flutter carousel never has to
+        branch on null.
+        """
+        if not self.image_urls:
+            self.image_urls = [self.image_url] if self.image_url else []
+        return self
 
 
 # =============================================================================
@@ -190,6 +246,47 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserRead
+
+
+# =============================================================================
+# Email OTP registration (2-step signup, Task: 6-digit code)
+# =============================================================================
+class SendOtpRequest(BaseModel):
+    """POST /auth/send-otp - start signup with a code mailed to the address."""
+
+    name: str = Field(..., min_length=1, max_length=120)
+    email: str = Field(..., min_length=5, max_length=255, pattern=_EMAIL_PATTERN)
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+        description="Plaintext password; bcrypt-hashed and parked on the OTP "
+                    "row until POST /auth/verify-otp creates the account.",
+    )
+
+
+class VerifyOtpRequest(BaseModel):
+    """POST /auth/verify-otp - code check, then the account is created."""
+
+    email: str = Field(..., min_length=5, max_length=255, pattern=_EMAIL_PATTERN)
+    otp_code: str = Field(
+        ...,
+        pattern=r"^\d{6}$",
+        description="Exactly 6 digits (leading zeros allowed).",
+    )
+
+
+class ResendOtpRequest(BaseModel):
+    """POST /auth/resend-otp - fresh code for a signup already in progress."""
+
+    email: str = Field(..., min_length=5, max_length=255, pattern=_EMAIL_PATTERN)
+
+
+class OtpSentResponse(BaseModel):
+    """Acknowledgement shared by send-otp + resend-otp."""
+
+    message: str = "Verification code sent to your email"
+    email: str
 
 
 # =============================================================================
@@ -251,6 +348,9 @@ class AdminListingRead(BaseModel):
     category: str
     condition: str
     image_url: str
+    image_urls: list[str] | None = None
+    ai_tags: str | None = None
+    ai_condition_notes: str | None = None
     suggested_price: float | None = None
     listed_price: float
     status: str
@@ -274,3 +374,190 @@ class AgentFlagUpdate(BaseModel):
     """Request body for PATCH /admin/ai-agents/{agent_key}."""
 
     enabled: bool
+
+
+# =============================================================================
+# Vision AI - 4-angle listing analysis (Task 2)
+# =============================================================================
+class AnalyzeImagesRequest(BaseModel):
+    """Request body for POST /products/analyze-images (authenticated)."""
+
+    image_urls: list[str] = Field(
+        ...,
+        max_length=16,
+        description="At least 4 photos: Front, Back, Side, "
+                    "Close-up/Label. Extra angles are welcome. Fewer than 4 "
+                    "is rejected with HTTP 400 by the endpoint (kept out of "
+                    "pydantic validation on purpose so the seller gets a "
+                    "clear, actionable message instead of a 422).",
+    )
+    title: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Optional seller hint - used only by the heuristic "
+                    "fallback when no vision API key is configured.",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=4000,
+        description="Optional seller hint for the heuristic fallback.",
+    )
+    condition: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Optional seller-declared condition hint (fallback only).",
+    )
+
+
+class AnalyzeImagesResponse(BaseModel):
+    """Strict-JSON result of the vision inspection of 4+ listing photos."""
+
+    source: str = Field(
+        description="'gemini' | 'openai' | 'groq' | 'openrouter' when a live "
+                    "vision model answered, otherwise 'heuristic'.",
+    )
+    provider: str
+    model: str
+    brand: str | None = None
+    model_name: str | None = Field(
+        default=None,
+        description="Exact model/variant read from the photos "
+                    "(e.g. 'SoundLink Flex').",
+    )
+    title: str
+    description: str
+    category: str
+    condition: Literal["Like New", "Good", "Fair"]
+    condition_notes: str = Field(
+        description="AI 4-angle wear inspection summary.",
+    )
+    price_min_inr: float = Field(description="Realistic 2nd-hand floor (INR).")
+    price_max_inr: float = Field(description="Realistic 2nd-hand ceiling (INR).")
+    suggested_price_inr: float = Field(
+        description="AI fair-value midpoint in Indian Rupees (never USD).",
+    )
+    listed_price_inr: float = Field(
+        description="Auto-filled asking price in INR (slightly under fair "
+                    "value so the item sells fast on campus).",
+    )
+    ai_tags: list[str] = Field(
+        min_length=5,
+        max_length=20,
+        description="10-15 search keywords: brand, synonyms, use-case terms.",
+    )
+    image_urls: list[str]
+
+    # protected_namespaces=() -> allows the `model` / `model_name` fields
+    # without Pydantic's "protected namespace model_" warning.
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
+
+
+class AnalyzeImagesHint(BaseModel):
+    """Optional extra context the client may attach (unused for now)."""
+
+    notes: str | None = None
+
+
+# =============================================================================
+# Master Admin - AI provider control plane (Task 2)
+# =============================================================================
+class AiConfigRead(BaseModel):
+    """GET /admin/ai-config - never leaks the raw key."""
+
+    ai_provider: Literal["gemini", "openai", "groq", "openrouter"]
+    ai_model: str
+    ai_base_url: str | None = None
+    has_api_key: bool
+    masked_key: str | None = Field(
+        default=None,
+        description="'sk-...abcd' style mask; null when no key is stored.",
+    )
+
+
+class AiConfigUpdate(BaseModel):
+    """PUT /admin/ai-config - applies immediately (no redeploy needed)."""
+
+    ai_provider: Literal["gemini", "openai", "groq", "openrouter"]
+    ai_model: str = Field(..., min_length=1, max_length=120)
+    ai_api_key: str | None = Field(
+        default=None,
+        max_length=400,
+        description="New API key. Omit to keep the stored one; send an empty "
+                    "string to clear it.",
+    )
+    ai_base_url: str | None = Field(
+        default=None,
+        max_length=400,
+        description="Optional custom endpoint URL.",
+    )
+
+
+# =============================================================================
+# Buyer-seller chat + CampusMart AI assistant (Task 5)
+# =============================================================================
+class ChatMessageCreate(BaseModel):
+    """Request body for POST /chats/messages."""
+
+    product_id: UUID
+    receiver_id: UUID
+    message: str = Field(..., min_length=1, max_length=4000)
+
+
+class ChatMessageRead(BaseModel):
+    """One message as returned by the chat endpoints."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    product_id: UUID
+    sender_id: UUID
+    receiver_id: UUID
+    message: str
+    created_at: datetime
+    is_read: bool = False
+
+
+class ConversationRead(BaseModel):
+    """One thread on the Messages tab (grouped by product + other student)."""
+
+    product_id: UUID
+    other_user_id: UUID
+    other_user_name: str
+    product_title: str
+    product_image_url: str | None = None
+    product_price: float | None = None
+    last_message: str
+    last_message_at: datetime
+    last_message_is_mine: bool
+    unread_count: int = 0
+    unread: bool = False
+
+
+class AiChatMessage(BaseModel):
+    """One turn of the assistant transcript sent by the client."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(..., max_length=8000)
+
+
+class AiChatRequest(BaseModel):
+    """Request body for POST /ai/chat."""
+
+    message: str = Field(..., min_length=1, max_length=4000)
+    history: list[AiChatMessage] = Field(
+        default_factory=list,
+        max_length=40,
+        description="Prior turns (oldest first) so the assistant keeps "
+                    "context across the conversation.",
+    )
+
+
+class AiChatResponse(BaseModel):
+    """Reply from the CampusMart AI assistant."""
+
+    reply: str
+    source: str = Field(
+        "'llm' when the configured provider answered, 'catalog' when the "
+        "rule-based local assistant answered.",
+    )
+    recommended_product_ids: list[UUID] = Field(default_factory=list)

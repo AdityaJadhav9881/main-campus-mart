@@ -20,6 +20,10 @@ class ProductProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
 
+  /// Last server-side search filters (kept so pull-to-refresh re-applies them).
+  String _lastQuery = '';
+  String _lastCategory = '';
+
   List<Product> get products => _products;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
@@ -31,15 +35,24 @@ class ProductProvider extends ChangeNotifier {
   }
 
   /// GET /products/ - first load and pull-to-refresh.
-  /// Existing items are kept visible during a refresh so the grid never
-  /// flashes empty; the full-screen loader only appears when there is
+  ///
+  /// Optional server-side filters (Discover search bar + category chips):
+  /// [query] maps to `?q=` (title/description/category/tag match) and
+  /// [category] to `?category=`. Omit a parameter to reuse the previous
+  /// value; pass an empty string to clear it. Existing items stay visible
+  /// during a refresh; the full-screen loader only appears when there is
   /// nothing to show yet.
-  Future<void> loadProducts() async {
+  Future<void> loadProducts({String? query, String? category}) async {
+    if (query != null) _lastQuery = query.trim();
+    if (category != null) _lastCategory = category.trim();
     _isLoading = true;
     _errorMessage = null;
     notifyListeners();
     try {
-      _products = await _api.fetchActiveProducts();
+      _products = await _api.fetchActiveProducts(
+        query: _lastQuery.isEmpty ? null : _lastQuery,
+        category: _lastCategory.isEmpty ? null : _lastCategory,
+      );
     } on ApiException catch (error) {
       _errorMessage = error.message;
     } catch (error) {

@@ -8,11 +8,12 @@ else is production code - FastAPI, SQLAlchemy, PostgreSQL, and LangGraph.
 What it checks:
     1. POST /users/  creates the test seller's profile (idempotent).
     2. Clean listing ("book" + "Like New"):
-         -> category "Academic Material", suggested_price 80.0, status "active"
+         -> category "Academic Material", suggested_price 400.0 (₹500 base x
+            0.80 Like New), status "active"
     3. Fraud listing ("free money" + "urgent wire transfer"):
          -> status "flagged" (and hidden from the public feed)
     4. Non-book listing without age:
-         -> category "Electronics", price from the condition table
+         -> category "Electronics", ₹1500 base x condition factor
     5. GET /products/ serves ONLY active listings.
 
 Prerequisites (run these first):
@@ -77,7 +78,7 @@ def main() -> None:
                     "condition": "Like New",
                     "age": "1 year",
                     "image_url": "https://cdn.example.com/book.jpg",
-                    "listed_price": 45.0,
+                    "listed_price": 350.0,
                 },
                 headers=HEADERS,
             )
@@ -87,8 +88,8 @@ def main() -> None:
             check("AI category = 'Academic Material'",
                   body.get("category") == "Academic Material",
                   str(body.get("category")))
-            check("suggested_price = 80.0 (Like New = 80% of base)",
-                  body.get("suggested_price") == 80.0,
+            check("suggested_price = 400.0 (Like New = 80% of ₹500 base)",
+                  body.get("suggested_price") == 400.0,
                   str(body.get("suggested_price")))
             check("status = 'active'", body.get("status") == "active",
                   str(body.get("status")))
@@ -102,7 +103,7 @@ def main() -> None:
                     "condition": "good",
                     "age": "2 years",
                     "image_url": "https://cdn.example.com/laptop.jpg",
-                    "listed_price": 300.0,
+                    "listed_price": 15000.0,
                 },
                 headers=HEADERS,
             )
@@ -111,8 +112,8 @@ def main() -> None:
             check("fraud listing -> 201", r.status_code == 201, str(r.status_code))
             check("status = 'flagged'", body.get("status") == "flagged",
                   str(body.get("status")))
-            check("suggested_price = 60.0 (good = 60% of base)",
-                  body.get("suggested_price") == 60.0,
+            check("suggested_price = 900.0 (good = 60% of ₹1500 Electronics base)",
+                  body.get("suggested_price") == 900.0,
                   str(body.get("suggested_price")))
 
             # --- 4. Non-book listing, no age ---------------------------------
@@ -123,7 +124,7 @@ def main() -> None:
                     "description": "works fine",
                     "condition": "fair",
                     "image_url": "https://cdn.example.com/calc.jpg",
-                    "listed_price": 15.0,
+                    "listed_price": 400.0,
                 },
                 headers=HEADERS,
             )
@@ -132,8 +133,8 @@ def main() -> None:
                   str(r.status_code))
             check("category = 'Electronics'", body.get("category") == "Electronics",
                   str(body.get("category")))
-            check("suggested_price = 40.0 (fair = 40% of base)",
-                  body.get("suggested_price") == 40.0,
+            check("suggested_price = 600.0 (fair = 40% of ₹1500 Electronics base)",
+                  body.get("suggested_price") == 600.0,
                   str(body.get("suggested_price")))
 
         # --- 5. Public feed serves active listings only ----------------------

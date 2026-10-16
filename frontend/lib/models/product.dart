@@ -14,6 +14,9 @@ class Product {
     this.category = 'Uncategorized',
     this.condition = 'Unknown',
     this.imageUrl = '',
+    this.imageUrls = const <String>[],
+    this.aiTags,
+    this.aiConditionNotes,
     this.suggestedPrice,
     this.listedPrice = 0,
     this.status = 'active',
@@ -34,6 +37,12 @@ class Product {
       category: json['category']?.toString() ?? 'Uncategorized',
       condition: json['condition']?.toString() ?? 'Unknown',
       imageUrl: json['image_url']?.toString() ?? '',
+      imageUrls: (json['image_urls'] as List<dynamic>? ?? const <dynamic>[])
+          .map((dynamic url) => url.toString())
+          .where((url) => url.isNotEmpty)
+          .toList(growable: false),
+      aiTags: json['ai_tags']?.toString(),
+      aiConditionNotes: json['ai_condition_notes']?.toString(),
       suggestedPrice: _toDouble(json['suggested_price']),
       listedPrice: _toDouble(json['listed_price']) ?? 0,
       status: json['status']?.toString() ?? 'active',
@@ -50,6 +59,16 @@ class Product {
   final String category;
   final String condition;
   final String imageUrl;
+
+  /// The full 4-angle photo gallery (front/back/side/label). Pre-upgrade rows
+  /// arrive empty - [photos] falls back to the single [imageUrl] cover.
+  final List<String> imageUrls;
+
+  /// Comma-separated AI search keywords produced by the 4-photo vision scan.
+  final String? aiTags;
+
+  /// Vision AI 4-angle wear inspection summary ("Front clean; back scuffed...").
+  final String? aiConditionNotes;
 
   /// AI fair-value estimate produced by the LangGraph pipeline.
   /// Null until the price agent has processed the listing.
@@ -71,6 +90,20 @@ class Product {
   /// Seller's display name (null on payloads from older backends).
   final String? sellerName;
 
+  /// Photos to show in the detail carousel/grid: the 4-angle gallery when the
+  /// seller ran the vision scan, else just the front cover.
+  List<String> get photos {
+    if (imageUrls.isNotEmpty) return imageUrls;
+    return imageUrl.isEmpty ? const <String>[] : <String>[imageUrl];
+  }
+
+  /// Parsed [aiTags] list (empty when the seller skipped the AI scan).
+  List<String> get tagList => (aiTags ?? '')
+      .split(',')
+      .map((tag) => tag.trim())
+      .where((tag) => tag.isNotEmpty)
+      .toList(growable: false);
+
   /// Serializes back to the API's snake_case contract.
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,
@@ -80,6 +113,9 @@ class Product {
         'category': category,
         'condition': condition,
         'image_url': imageUrl,
+        'image_urls': imageUrls,
+        'ai_tags': aiTags,
+        'ai_condition_notes': aiConditionNotes,
         'suggested_price': suggestedPrice,
         'listed_price': listedPrice,
         'status': status,

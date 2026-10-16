@@ -11,6 +11,8 @@ Live Admin Master Control endpoints for the React Admin Dashboard (Phase 7).
     DELETE /admin/listings/{product_id}      - delete + trust penalty (-0.8, floor 0.0)
     GET  /admin/ai-agents                    - runtime agent flags
     PATCH /admin/ai-agents/{agent_key}       - toggle an agent on/off
+    GET  /admin/ai-config                    - Vision-AI provider/model/key (masked)
+    PUT  /admin/ai-config                    - update them live (no redeploy)
 
 Auth: OPTIONAL by default so the standalone React dashboard (which calls
 /admin/* straight from the browser with no student Bearer JWT) works
@@ -27,13 +29,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from ..ai import vision_master
 from ..ai.orchestrator import (
     AGENT_KEYS,
     get_agent_flags,
     reset_agent_flags,
     set_agent_enabled,
 )
-from ..auth import require_admin_access
+from ..auth import is_super_admin, require_admin_access
 from ..database import get_db
 from ..models import Product, User
 from ..schemas import (
@@ -41,6 +44,8 @@ from ..schemas import (
     AdminOverviewResponse,
     AdminUserStatusUpdate,
     AgentFlagUpdate,
+    AiConfigRead,
+    AiConfigUpdate,
     UserRead,
 )
 
@@ -65,6 +70,9 @@ def _admin_listing(product: Product) -> AdminListingRead:
         category=product.category,
         condition=product.condition,
         image_url=product.image_url,
+        image_urls=product.image_urls or ([product.image_url] if product.image_url else None),
+        ai_tags=product.ai_tags,
+        ai_condition_notes=product.ai_condition_notes,
         suggested_price=product.suggested_price,
         listed_price=product.listed_price,
         status=product.status,
@@ -144,12 +152,25 @@ def update_user_status(
 
     Blocked users immediately receive 403 on listing creation, image upload,
     and purchases (enforced in the products/transactions routers).
+
+    Super-Administrator protection: the official administration account
+    (SUPER_ADMIN_EMAIL) can NEVER be set to 'blocked' - a mis-click on the
+    dashboard must not lock the last admin out of the platform.
     """
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
+        )
+
+    if payload.status == "blocked" and is_super_admin(user.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Super Administrator '{user.email}' is protected and cannot "
+                "be blocked."
+            ),
         )
 
     user.status = payload.status
@@ -283,6 +304,74 @@ def update_agent_flag(agent_key: str, payload: AgentFlagUpdate) -> dict:
         )
     set_agent_enabled(agent_key, payload.enabled)
     return {"agents": get_agent_flags()}
+
+
+# =============================================================================
+# Vision-AI provider control plane (Task 2)
+# =============================================================================
+def _ai_config_read(db: Session) -> AiConfigRead:
+    """Build the masked GET response (never leaks the raw key)."""
+    config = vision_master.get_ai_config(db)
+    key = config["ai_api_key"]
+    return AiConfigRead(
+        ai_provider=config["ai_provider"],  # type: ignore[arg-type]
+        ai_model=config["ai_model"],
+        ai_base_url=config["ai_base_url"] or None,
+        has_api_key=bool(key),
+        masked_key=vision_master.mask_key(key),
+    )
+
+
+@router.get(
+    "/ai-config",
+    response_model=AiConfigRead,
+    summary="Current Vision-AI provider settings (masked)",
+)
+def get_ai_config(db: Session = Depends(get_db)) -> AiConfigRead:
+    """Read the live provider/model/key config from PostgreSQL.
+
+    `has_api_key` tells the dashboard whether the Sell flow's 4-photo scan is
+    running full vision analysis or the INR heuristic fallback; `masked_key`
+    shows only `sk-...abcd` so screens can be shared safely.
+    """
+    return _ai_config_read(db)
+
+
+@router.put(
+    "/ai-config",
+    response_model=AiConfigRead,
+    summary="Update Vision-AI provider settings (applies immediately)",
+)
+def update_ai_config(
+    payload: AiConfigUpdate,
+    db: Session = Depends(get_db),
+) -> AiConfigRead:
+    """Persist provider/model/key/base_url to PostgreSQL and apply at once.
+
+    The very next POST /products/analyze-images (and POST /ai/chat) uses the
+    new provider - no redeploy, no restart. `ai_api_key: null` keeps the
+    stored key; an empty string clears it.
+    """
+    base_url = (payload.ai_base_url or "").strip()
+    if base_url and not base_url.lower().startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ai_base_url must be an http(s) URL.",
+        )
+    try:
+        vision_master.save_ai_config(
+            db,
+            provider=payload.ai_provider,
+            model=payload.ai_model,
+            api_key=payload.ai_api_key,
+            base_url=base_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return _ai_config_read(db)
 
 
 # (reset_agent_flags is exported for the E2E harness; not exposed via HTTP to

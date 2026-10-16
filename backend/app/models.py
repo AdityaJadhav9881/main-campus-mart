@@ -5,9 +5,11 @@ SQLAlchemy ORM schema definitions for CampusMart AI (Phase 1).
 
 Tables
 ------
-users        : Student accounts hydrated from Firebase Auth.
-products     : Second-hand items listed by sellers on the marketplace.
-transactions : Purchase records linking a buyer to a product.
+users          : Student accounts hydrated from Firebase Auth.
+products       : Second-hand items listed by sellers on the marketplace.
+transactions   : Purchase records linking a buyer to a product.
+system_config  : Runtime settings (AI provider/model/key) owned by the admin.
+chat_messages  : Buyer-seller messages scoped to a product thread.
 
 Design notes
 ------------
@@ -26,6 +28,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     Column,
     DateTime,
@@ -162,6 +165,25 @@ class Product(Base):
     # (Phase 3) to compute the fair-value suggestion.
     image_url = Column(String(500), nullable=False)
 
+    # --- Production upgrade (multi-angle visual listing) ---------------------
+    # JSON array of EVERY photo uploaded for this listing. `image_url` above
+    # stays the front cover (backward compatible with old clients / the grid),
+    # while this holds the full 4-angle set the vision AI inspects:
+    #   ["...front.jpg", "...back.jpg", "...side.jpg", "...label.jpg", ...]
+    # Stored as JSON (TEXT + json_parse on PostgreSQL) so the read path is a
+    # plain Python list on every dialect (PostgreSQL in prod, SQLite in tests).
+    image_urls = Column(JSON, nullable=True)
+
+    # Comma-separated visual-search keywords produced by the vision AI
+    # (brand, model, object type, synonyms, use-case terms), e.g.
+    # "bose, soundlink, bluetooth speaker, portable audio, electronics".
+    # Indexed by GET /products/?q= ... (searched with ILIKE, so no B-tree).
+    ai_tags = Column(Text, nullable=True)
+
+    # AI inspection summary across all 4 angles (wear, scratches, missing
+    # parts, authenticity cues). Displayed on the product detail screen.
+    ai_condition_notes = Column(Text, nullable=True)
+
     # AI-computed fair value (ultralytics YOLO + scikit-learn regressor).
     # NULLABLE on purpose: the vision pipeline fills this asynchronously after
     # the seller submits the listing, so it may not exist at INSERT time.
@@ -233,6 +255,104 @@ class Product(Base):
         """
         return self.seller.name if self.seller else None
 
+    @property
+    def photo_urls(self) -> "list[str]":
+        """Every photo for this listing, front cover first.
+
+        Falls back to the single legacy `image_url` column for rows created
+        before the 4-angle upgrade, so old listings still render a gallery.
+        """
+        urls = [u for u in (self.image_urls or []) if u]
+        if not urls and self.image_url:
+            urls = [self.image_url]
+        return urls
+
+
+class SystemConfig(Base):
+    """Runtime configuration persisted in PostgreSQL (Master Admin controlled).
+
+    One row per setting. The AI provider settings written by
+    `PUT /admin/ai-config` live here so a Render redeploy (which wipes the
+    filesystem but keeps Neon) still boots with the same provider/model/key:
+
+        ai_provider  : 'gemini' | 'openai' | 'groq' | 'openrouter'
+        ai_model     : e.g. 'gemini-2.5-flash'
+        ai_api_key   : the key the Master Admin pasted in the dashboard
+        ai_base_url  : optional custom endpoint override
+    """
+
+    __tablename__ = "system_config"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default="now()",
+    )
+
+
+class ChatMessage(Base):
+    """One buyer-seller message on a specific product's thread.
+
+    Threads are identified by the (product_id, sender/receiver) pair: the same
+    two students talking about two different products are two separate
+    conversations, which is exactly what the Messages tab groups by.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    product_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    sender_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    receiver_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    message = Column(Text, nullable=False)
+
+    # Set the first time the receiver opens the thread -> drives the unread
+    # badge on the Messages tab (NULL = unread).
+    read_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+    # --- Relationships -------------------------------------------------------
+    # back_populates is intentionally omitted on the sender/receiver side:
+    # User has no `sent_messages` accessor, so simple FK relationships keep
+    # the ORM from needing ambiguous-foreign-key resolution on User.
+    product = relationship("Product", lazy="joined")
+    sender = relationship("User", foreign_keys=[sender_id], lazy="joined")
+    receiver = relationship("User", foreign_keys=[receiver_id], lazy="joined")
+
 
 class Transaction(Base):
     """An immutable purchase record: which buyer bought which product, for how
@@ -288,3 +408,40 @@ class Transaction(Base):
     # --- Relationships -------------------------------------------------------
     buyer = relationship("User", back_populates="purchases")
     product = relationship("Product", back_populates="transactions")
+
+
+class EmailOTP(Base):
+    """Pending 6-digit email verification code for the OTP signup flow.
+
+    Row lifecycle (Task: registration OTP):
+        POST /auth/send-otp   -> upserts ONE row per email (10-min expiry)
+                                 holding the hashed password + display name so
+                                 verify-otp can create the User atomically.
+        POST /auth/verify-otp -> validates the code, creates the active User,
+                                 then DELETES this row.
+        POST /auth/resend-otp -> replaces otp_code + expiry on the same row.
+
+    Stale rows simply expire (expires_at); no cleanup job is needed because
+    send-otp overwrites per email.
+    """
+
+    __tablename__ = "email_otps"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    # UNIQUE + index: one pending signup per email address.
+    email = Column(String(255), unique=True, nullable=False, index=True)
+
+    # 6-digit code as String so leading zeros ("012345") survive intact.
+    otp_code = Column(String(6), nullable=False)
+
+    # Snapshot of the signup form, consumed when the User row is created.
+    name = Column(String(120), nullable=False)
+    password_hash = Column(String(128), nullable=False)
+
+    expires_at = Column(DateTime(timezone=True), nullable=False)

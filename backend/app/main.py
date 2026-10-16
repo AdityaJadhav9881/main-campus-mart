@@ -14,17 +14,53 @@ Run from the /backend folder:
 """
 
 from contextlib import asynccontextmanager
+import logging
 import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .auth import init_firebase
-from .database import Base, engine
-from .routers import admin, auth_routes, products, transactions, users
+from .auth import PROTECTED_ADMIN_EMAILS, SUPER_ADMIN_EMAIL, init_firebase
+from .database import Base, SessionLocal, engine
+from .models import User
+from .routers import admin, auth_routes, chat, products, transactions, users
 from .schema_upgrade import upgrade_schema
 from .storage import UPLOAD_DIR
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_super_admin_active() -> None:
+    """Boot-time unblock protection for the Super-Administrator account.
+
+    PATCH /admin/users/{id}/status refuses to block this email, but this
+    re-assert is the backstop for a row that was blocked before the guard
+    existed (or modified directly in Neon): every Render restart forces the
+    protected admin accounts back to status='active'.
+    Non-fatal by design - a hiccup here must never abort server startup.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            for admin_email in PROTECTED_ADMIN_EMAILS:
+                user = (
+                    db.query(User)
+                    .filter(User.email.ilike(admin_email))
+                    .first()
+                )
+                if user is not None and user.status != "active":
+                    previous = user.status
+                    user.status = "active"
+                    db.commit()
+                    logger.warning(
+                        "Super-admin %s was '%s' - forced back to 'active' at boot",
+                        user.email, previous,
+                    )
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - boot safety net, never fatal
+        logger.exception("Super-admin boot check failed (non-fatal)")
 
 
 @asynccontextmanager
@@ -48,7 +84,11 @@ async def lifespan(app: FastAPI):
     # 3. Phase 7 live-DB upgrade: add columns (users.status, users.password_hash,
     #    products.trust_reason) to tables that were created BEFORE Phase 7.
     #    Idempotent PostgreSQL ALTERs; no-op on SQLite (fresh test schemas).
+    #    Also creates system_config / chat_messages / email_otps when missing.
     upgrade_schema(engine)
+
+    # 4. Super-Administrator unblock protection (non-fatal if it misbehaves).
+    _ensure_super_admin_active()
 
     yield
 
@@ -103,10 +143,13 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 # Routers (Phase 2, Task 3)
 # -----------------------------------------------------------------------------
 app.include_router(users.router)        # /users/ , /users/{firebase_uid}
-app.include_router(products.router)     # /products/ , /products/upload-image/
+app.include_router(products.router)     # /products/ , /products/upload-image/ ,
+                                        # /products/analyze-images (Task 2)
 app.include_router(auth_routes.router)  # /auth/register , /auth/login (Phase 7)
 app.include_router(transactions.router) # /products/{id}/purchase , /transactions/my
-app.include_router(admin.router)        # /admin/* master control (Phase 7)
+app.include_router(admin.router)        # /admin/* master control (Phase 7 + ai-config)
+app.include_router(chat.router)         # /chats/* buyer-seller messaging (Task 5)
+app.include_router(chat.ai_router)      # /ai/chat student assistant (Task 5)
 
 
 @app.get("/", tags=["health"])

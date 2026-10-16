@@ -1,23 +1,33 @@
 """
 schema_upgrade.py
 =================
-Best-effort live-database column migrator for CampusMart AI (Phase 7).
+Best-effort live-database migrator for CampusMart AI (Phase 7 + production
+multi-angle upgrade).
 
 `Base.metadata.create_all` only creates MISSING tables — it never ALTERs an
-existing table. On a live Render Postgres that was provisioned before Phase 7
-(columns `users.status`, `users.password_hash`, `products.trust_reason` did
-not exist), this module adds those columns idempotently with
-`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (PostgreSQL-only).
+existing table. On a live Render/Neon Postgres that was provisioned before the
+current release, this module adds missing columns idempotently with
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (PostgreSQL-only) and creates the
+brand-new tables (`system_config`, `chat_messages`) with `checkfirst=True`.
+
+Covered by this file:
+    Phase 7 columns : users.status, users.password_hash, products.trust_reason
+    Upgrade columns : products.image_urls (JSON), products.ai_tags,
+                      products.ai_condition_notes, chat_messages.read_at
+    New tables      : system_config, chat_messages, email_otps
 
 This is a stopgap until Alembic migrations land (see README roadmap).
 SQLite (test harnesses) always builds a fresh schema via create_all, so the
-migrator is a no-op there.
+ALTER path is a no-op there — the table creation remains safe thanks to the
+existence check.
 """
 
 import logging
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+
+from .models import ChatMessage, EmailOTP, SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +36,38 @@ _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "status", "VARCHAR(16) DEFAULT 'active'"),
     ("users", "password_hash", "VARCHAR(128)"),
     ("products", "trust_reason", "TEXT"),
+    # --- Production multi-angle / AI-search upgrade -------------------------
+    # JSON (not JSONB) so the same DDL is valid on every PostgreSQL version
+    # Neon offers and SQLAlchemy still decodes it into a Python list.
+    ("products", "image_urls", "JSON"),
+    ("products", "ai_tags", "TEXT"),
+    ("products", "ai_condition_notes", "TEXT"),
+    # Unread badge support for the Messages tab (NULL = unread).
+    ("chat_messages", "read_at", "TIMESTAMP WITH TIME ZONE"),
 )
+
+# Brand-new tables that older databases predate. `create_all` covers them on
+# a fresh boot; this loop covers "run schema_upgrade against the live DB".
+_NEW_TABLES = (SystemConfig.__table__, ChatMessage.__table__, EmailOTP.__table__)
 
 
 def upgrade_schema(engine: Engine) -> None:
-    """Add any Phase 7 columns that are missing on a pre-existing PostgreSQL.
+    """Bring a pre-existing database up to the current model set.
 
-    Safe to call on every boot: each ALTER is guarded by IF NOT EXISTS, and
-    non-PostgreSQL engines (SQLite in tests) are skipped entirely.
+    Safe to call on every boot: table creation is guarded by checkfirst and
+    every ALTER is guarded by IF NOT EXISTS.
     """
+    inspector = inspect(engine)
+
+    # 1. New tables first (chat_messages must exist before its column ALTER).
+    #    `checkfirst=True` makes the CREATE TABLE a no-op when it is already
+    #    there, so this doubles as the create_all safety net for live DBs.
+    for table in _NEW_TABLES:
+        if not inspector.has_table(table.name):
+            table.create(bind=engine, checkfirst=True)
+            logger.info("schema_upgrade: created table %s", table.name)
+
+    # 2. New columns — PostgreSQL only (SQLite test schemas are always fresh).
     if engine.dialect.name != "postgresql":
         return
 

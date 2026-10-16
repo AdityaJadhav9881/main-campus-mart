@@ -4,7 +4,7 @@
          live API (Render), Cloudinary, or Firebase. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="Campus Mart Ai"
+        android:label="CampusMart"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

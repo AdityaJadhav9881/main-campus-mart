@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/product.dart';
 import '../providers/wishlist_provider.dart';
+import '../services/currency.dart';
 import 'app_theme.dart';
 import 'category_icon.dart';
 import 'condition_badge.dart';
@@ -112,12 +113,12 @@ class ProductCard extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          '\$${product.listedPrice.toStringAsFixed(2)}',
+                          formatInr(product.listedPrice),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            color: AppColors.cyanAccent,
-                            fontSize: 16,
+                            color: AppColors.inkBlack,
+                            fontSize: 16.5,
                             fontWeight: FontWeight.w800,
                           ),
                         ),
@@ -154,16 +155,16 @@ class _DiscountBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
       decoration: BoxDecoration(
-        color: AppColors.success.withOpacity(0.94),
+        color: AppColors.success.withOpacity(0.95),
         borderRadius: BorderRadius.circular(7),
         boxShadow: const [
-          BoxShadow(color: Colors.black45, blurRadius: 6, offset: Offset(0, 2)),
+          BoxShadow(color: Color(0x22000000), blurRadius: 4, offset: Offset(0, 2)),
         ],
       ),
       child: Text(
         '$percent% BELOW AI VALUE',
         style: const TextStyle(
-          color: Colors.black,
+          color: Colors.white,
           fontSize: 8.5,
           fontWeight: FontWeight.w900,
           letterSpacing: 0.3,
@@ -216,17 +217,17 @@ class _CategoryChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: AppColors.cyanAccent.withOpacity(0.10),
+        color: AppColors.royalBlue.withOpacity(0.08),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.35)),
+        border: Border.all(color: AppColors.royalBlue.withOpacity(0.25)),
       ),
       child: Text(
         label.toUpperCase(),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
-          color: AppColors.cyanAccent,
-          fontSize: 8.5,
+          color: AppColors.royalBlue,
+          fontSize: 10,
           fontWeight: FontWeight.w800,
           letterSpacing: 0.5,
         ),
@@ -235,7 +236,7 @@ class _CategoryChip extends StatelessWidget {
   }
 }
 
-/// Listed price vs AI fair value: "AI $80.00" struck through next to the ask.
+/// Listed price vs AI fair value: "AI ₹80" struck through next to the ask.
 class _AiFairPriceLine extends StatelessWidget {
   const _AiFairPriceLine({required this.suggested, required this.listed});
 
@@ -249,7 +250,7 @@ class _AiFairPriceLine extends StatelessWidget {
       children: [
         Flexible(
           child: Text(
-            'AI fair \$${suggested.toStringAsFixed(2)}',
+            'AI fair ${formatInr(suggested)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(

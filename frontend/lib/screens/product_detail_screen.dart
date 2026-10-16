@@ -8,10 +8,12 @@ import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
 import '../providers/wishlist_provider.dart';
 import '../services/api_service.dart';
+import '../services/currency.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/category_icon.dart';
 import '../widgets/condition_badge.dart';
 import '../widgets/trust_score_meter.dart';
+import 'chat_thread_screen.dart';
 
 /// Route pushed from the feed: full product presentation with Hero image,
 /// the Multi-Agent AI Inspection Report, the live seller identity + trust
@@ -62,7 +64,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           backgroundColor: AppColors.success.withOpacity(0.92),
           content: Text(
             'Purchase confirmed — ${product.title} is yours! '
-            '\$${result.finalPrice.toStringAsFixed(2)} paid.',
+            '${formatInr(result.finalPrice)} paid.',
             style: const TextStyle(
               color: Colors.black,
               fontWeight: FontWeight.w700,
@@ -160,20 +162,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   // Same Hero tag as ProductCard for the shared-element anim.
                   Hero(
                     tag: 'product-image-${product.id}',
-                    child: _DetailImage(
-                      url: product.imageUrl,
-                      category: product.category,
-                    ),
-                  ),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [Color(0x55000000), Colors.transparent, Color(0xAA0A0E14)],
-                        stops: [0.0, 0.45, 1.0],
-                      ),
-                    ),
+                    child: _HeroGallery(product: product),
                   ),
                 ],
               ),
@@ -201,10 +190,11 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   Text(
                     product.title,
                     style: const TextStyle(
-                      color: AppColors.textPrimary,
+                      fontFamily: 'Georgia',
+                      color: AppColors.inkBlack,
                       fontSize: 24,
-                      height: 1.2,
-                      fontWeight: FontWeight.w800,
+                      height: 1.25,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                   const SizedBox(height: 18),
@@ -218,6 +208,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       height: 1.55,
                     ),
                   ),
+                  if (product.tagList.isNotEmpty) ...[
+                    const SizedBox(height: 18),
+                    _AiTagsBlock(tags: product.tagList),
+                  ],
                   const SizedBox(height: 26),
                   _buildSellerCard(),
                   if (_similarListings().isNotEmpty) ...[
@@ -277,6 +271,23 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   // ---------------------------------------------------------------------------
   // Seller trust card
   // ---------------------------------------------------------------------------
+  void _openChatWithSeller() {
+    final sellerName = (product.sellerName ?? '').trim();
+    final displayName = sellerName.isEmpty ? 'Campus Seller' : sellerName;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChatThreadScreen(
+          productId: product.id,
+          productTitle: product.title,
+          productImageUrl: product.imageUrl,
+          productPrice: product.listedPrice,
+          otherUserId: product.sellerId,
+          otherUserName: displayName,
+        ),
+      ),
+    );
+  }
+
   Widget _buildSellerCard() {
     final trustScore = product.sellerTrustScore ?? 5.0;
     final sellerName = (product.sellerName ?? '').trim();
@@ -341,6 +352,38 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           ),
           const SizedBox(height: 16),
           TrustScoreMeter(score: trustScore, label: 'Trust score'),
+          // Task 5: buyer-seller chat entry point on every active listing
+          // the signed-in student does not own.
+          if (!_isOwnListing && _status == 'active') ...[
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _openChatWithSeller,
+                icon: const Icon(Icons.chat_bubble_outline, size: 17),
+                label: const Text(
+                  'Chat with Seller',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.cyanAccent,
+                  side: BorderSide(
+                    color: AppColors.cyanAccent.withOpacity(0.55),
+                    width: 1.2,
+                  ),
+                  minimumSize: const Size.fromHeight(46),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  textStyle: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -440,14 +483,43 @@ class _AiInspectionReport extends StatelessWidget {
             icon: Icons.category_outlined,
             color: AppColors.cyanAccent,
             agent: 'Listing Intelligence Agent',
-            child: Text(
-              'Verified category: ${product.category} · Condition: '
-              '${product.condition}',
-              style: const TextStyle(
-                color: AppColors.textMuted,
-                fontSize: 12.5,
-                height: 1.4,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Verified category: ${product.category} · Condition: '
+                  '${product.condition}',
+                  style: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 12.5,
+                    height: 1.4,
+                  ),
+                ),
+                if ((product.aiConditionNotes ?? '').trim().isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.photo_camera_outlined,
+                        size: 13,
+                        color: AppColors.cyanAccent,
+                      ),
+                      const SizedBox(width: 5),
+                      Expanded(
+                        child: Text(
+                          product.aiConditionNotes!.trim(),
+                          style: const TextStyle(
+                            color: AppColors.cyanAccent,
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
             ),
           ),
           const _ReportDivider(),
@@ -588,7 +660,7 @@ class _PriceComparison extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                'Listed  \$${listed.toStringAsFixed(2)}',
+                'Listed  ${formatInr(listed)}',
                 style: const TextStyle(
                   color: AppColors.textPrimary,
                   fontSize: 13.5,
@@ -633,9 +705,9 @@ class _PriceComparison extends StatelessWidget {
         const SizedBox(height: 6),
         Text(
           below
-              ? 'You save \$${(fair - listed).toStringAsFixed(2)} vs the AI fair value.'
-              : 'AI fair value is \$${fair.toStringAsFixed(2)} — '
-                  '\$${(listed - fair).toStringAsFixed(2)} above estimate.',
+              ? 'You save ${formatInr(fair - listed)} vs the AI fair value.'
+              : 'AI fair value is ${formatInr(fair)} — '
+                  '${formatInr(listed - fair)} above estimate.',
           style: TextStyle(
             color: below ? AppColors.success : AppColors.warning,
             fontSize: 12,
@@ -689,9 +761,9 @@ class _PriceBar extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         SizedBox(
-          width: 58,
+          width: 66,
           child: Text(
-            '\$${value.toStringAsFixed(2)}',
+            formatInr(value),
             textAlign: TextAlign.right,
             style: TextStyle(
               color: color,
@@ -792,7 +864,7 @@ class _SimilarListingsSection extends StatelessWidget {
                                 children: [
                                   Expanded(
                                     child: Text(
-                                      '\$${item.listedPrice.toStringAsFixed(2)}',
+                                      formatInr(item.listedPrice),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
@@ -890,7 +962,7 @@ class _BottomBuyBar extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '\$${product.listedPrice.toStringAsFixed(2)}',
+                  formatInr(product.listedPrice),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -1042,6 +1114,175 @@ class _DetailImage extends StatelessWidget {
       },
       errorBuilder: (context, error, stackTrace) =>
           ImageFallbackIcon(category: category, size: 56),
+    );
+  }
+}
+
+/// 4-angle photo gallery inside the Hero header: swipeable PageView over
+/// [Product.photos] (front/back/side/label from the vision scan, else just
+/// the cover) with a page counter + dot indicator and the app's signature
+/// top/bottom scrim.
+class _HeroGallery extends StatefulWidget {
+  const _HeroGallery({required this.product});
+
+  final Product product;
+
+  @override
+  State<_HeroGallery> createState() => _HeroGalleryState();
+}
+
+class _HeroGalleryState extends State<_HeroGallery> {
+  late final PageController _controller;
+  int _page = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = PageController();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final category = widget.product.category;
+    final photos = widget.product.photos;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (photos.isEmpty)
+          _DetailImage(url: widget.product.imageUrl, category: category)
+        else
+          PageView.builder(
+            controller: _controller,
+            itemCount: photos.length,
+            onPageChanged: (page) => setState(() => _page = page),
+            itemBuilder: (context, index) => _DetailImage(
+              url: photos[index],
+              category: category,
+            ),
+          ),
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Color(0x55000000),
+                Colors.transparent,
+                Color(0xAA0A0E14),
+              ],
+              stops: [0.0, 0.45, 1.0],
+            ),
+          ),
+        ),
+        if (photos.length > 1) ...[
+          Positioned(
+            left: 14,
+            bottom: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.55),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Text(
+                '${_page + 1} / ${photos.length}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            right: 14,
+            bottom: 14,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var index = 0; index < photos.length; index++)
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    margin: const EdgeInsets.only(left: 5),
+                    width: index == _page ? 16 : 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: index == _page
+                          ? AppColors.cyanAccent
+                          : Colors.white54,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// "AI search tags" chips produced by the 4-photo vision scan - shows the
+/// keywords buyers can discover this listing with.
+class _AiTagsBlock extends StatelessWidget {
+  const _AiTagsBlock({required this.tags});
+
+  final List<String> tags;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.tag, size: 14, color: AppColors.cyanAccent),
+            SizedBox(width: 6),
+            Text(
+              'AI Search Tags',
+              style: TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.8,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 9),
+        Wrap(
+          spacing: 7,
+          runSpacing: 7,
+          children: [
+            for (final tag in tags)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(color: AppColors.hairline),
+                ),
+                child: Text(
+                  tag,
+                  style: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }

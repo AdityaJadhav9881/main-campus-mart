@@ -2,27 +2,33 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../models/ai_analysis.dart';
 import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
 import '../services/ai_price_estimate.dart';
 import '../services/api_service.dart';
+import '../services/currency.dart';
 import '../widgets/app_theme.dart';
 
-/// Tab 2 - "Sell on Campus Mart Ai".
+/// Tab 1 - "Sell on Campus Mart Ai" (Task 3: mandatory 4-photo vision flow).
 ///
 /// Collects the listing details, then hands them to POST /products/ where the
 /// LangGraph AI pipeline derives the category, suggests a fair price, and runs
 /// the fraud check. Highlights:
-///   * Camera **or** Gallery photo pick with a full-bleed preview.
-///   * The raw "Image URL" field is hidden behind a "Paste URL instead" link.
-///   * A live "✨ AI Smart Estimate" banner mirrors the backend price agent so
-///     students see a fair-price range before submitting.
+///   * **4 mandatory photo slots** (Front, Back, Side, Label/Close-up) - the
+///     exact angles the Vision AI needs; submit stays locked until all four
+///     are captured from camera or gallery.
+///   * **Automatic AI scan** the moment the 4th upload lands: POST
+///     /products/analyze-images auto-fills title, description, condition and
+///     price (fields the student has not typed yet), plus AI tags + 4-angle
+///     condition notes for the listing.
+///   * A live "✨ AI Smart Estimate" banner mirrors the backend price agent.
 ///   * The submit button sits well above the bottom navigation bar so
 ///     floating snackbars never cover it.
 class CreateListingScreen extends StatefulWidget {
   const CreateListingScreen({super.key, required this.onListingCreated});
 
-  /// Called after a successful creation so the shell can switch to Tab 1.
+  /// Called after a successful creation so the shell can switch to Discover.
   final VoidCallback onListingCreated;
 
   @override
@@ -35,7 +41,6 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
   final TextEditingController _descriptionController = TextEditingController();
   final TextEditingController _ageController = TextEditingController();
   final TextEditingController _priceController = TextEditingController();
-  final TextEditingController _imageController = TextEditingController();
 
   static const List<String> _conditions = <String>[
     'Like New',
@@ -43,41 +48,70 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     'Fair',
     'Poor',
   ];
+
+  /// Slot labels shown on the empty tiles (the 4 vision angles).
+  static const List<String> _slotLabels = <String>[
+    'Front',
+    'Back',
+    'Side',
+    'Label / Close-up',
+  ];
+
+  /// CDN URLs of the captured photos, max 4 (index = slot).
+  final List<String> _photos = <String>[];
+
+  /// 1-based slot currently uploading (0 while idle) for the tile spinner.
+  int _uploadingSlot = 0;
+
   String _condition = _conditions.first;
 
-  /// True while the picked photo is in flight to POST /products/upload-image/.
-  bool _isUploading = false;
+  /// Strict-JSON result of the 4-photo scan (null until it succeeds).
+  AiPhotoAnalysis? _analysis;
+  bool _isScanning = false;
 
-  /// Advanced escape hatch: the developer-facing "Image URL" field stays
-  /// hidden unless the student taps "Paste URL instead".
-  bool _showUrlField = false;
+  /// True while programmatic auto-fill writes are in flight so the
+  /// "user typed this" listeners below do not mark the fields as edited.
+  bool _autoFilling = false;
 
-  /// Explicit camera/gallery choice surfaced as a bottom sheet.
-  ImageSource? _lastSource;
+  /// Tracks fields the student has actually typed into - auto-fill never
+  /// overwrites a value the seller chose themselves.
+  bool _titleEdited = false;
+  bool _descriptionEdited = false;
+  bool _priceEdited = false;
 
   /// Clearance so the submit button never hides behind the tab shell's
   /// bottom navigation bar (or a floating snackbar riding on top of it).
   static const double _bottomNavClearance = 96;
 
+  bool get _photosComplete => _photos.length >= _slotLabels.length;
+  bool get _isBusy => _isScanning || _uploadingSlot != 0;
+
   @override
   void initState() {
     super.initState();
-    // Rebuild on every keystroke so the AI Smart Estimate stays live.
-    _titleController.addListener(_onFormChanged);
+    // Rebuild on every keystroke so the AI Smart Estimate stays live, and
+    // remember which fields the seller filled in themselves.
+    _titleController.addListener(() {
+      if (!_autoFilling) _titleEdited = true;
+      _onFormChanged();
+    });
+    _descriptionController.addListener(() {
+      if (!_autoFilling) _descriptionEdited = true;
+      _onFormChanged();
+    });
     _ageController.addListener(_onFormChanged);
-    _priceController.addListener(_onFormChanged);
+    _priceController.addListener(() {
+      if (!_autoFilling) _priceEdited = true;
+      _onFormChanged();
+    });
   }
 
   @override
   void dispose() {
-    _titleController.removeListener(_onFormChanged);
-    _ageController.removeListener(_onFormChanged);
-    _priceController.removeListener(_onFormChanged);
     _titleController.dispose();
     _descriptionController.dispose();
     _ageController.dispose();
     _priceController.dispose();
-    _imageController.dispose();
     super.dispose();
   }
 
@@ -86,9 +120,14 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     setState(() {}); // cheap: only re-runs the estimate banner build
   }
 
-  /// Bottom-sheet choice between taking a photo and picking one.
-  Future<void> _choosePhotoSource() async {
-    if (_isUploading) return;
+  // ---------------------------------------------------------------------------
+  // Photos: bottom-sheet source choice -> cloud upload -> slot management
+  // ---------------------------------------------------------------------------
+
+  /// Bottom-sheet choice between taking a photo and picking one for [slot].
+  Future<void> _choosePhotoSource(int slot) async {
+    if (_isBusy) return;
+    final label = slot < _slotLabels.length ? _slotLabels[slot] : 'Photo';
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       backgroundColor: AppColors.surface,
@@ -100,11 +139,11 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 18, 20, 12),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
               child: Text(
-                'ADD A PHOTO',
-                style: TextStyle(
+                'ADD PHOTO ${slot + 1}: ${label.toUpperCase()}',
+                style: const TextStyle(
                   color: AppColors.textMuted,
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
@@ -135,13 +174,13 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
         ),
       ),
     );
-    if (source != null) await _pickAndUploadImage(source);
+    if (source != null) await _pickAndUploadImage(source, slot);
   }
 
-  /// Phase 6 cloud pipeline: pick -> POST /products/upload-image/ ->
-  /// returned CDN URL lands in the image field (used as `image_url` on submit).
-  Future<void> _pickAndUploadImage(ImageSource source) async {
-    if (_isUploading) return;
+  /// Phase 6 cloud pipeline: pick -> POST /products/upload-image/ -> the CDN
+  /// URL lands in [slot]. Filling the 4th slot kicks off the AI scan.
+  Future<void> _pickAndUploadImage(ImageSource source, int slot) async {
+    if (_isBusy) return;
 
     // Capture everything needed AFTER awaits before leaving this context.
     final messenger = ScaffoldMessenger.of(context);
@@ -155,8 +194,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     );
     if (picked == null) return; // user cancelled the picker
 
-    _lastSource = source;
-    setState(() => _isUploading = true);
+    setState(() => _uploadingSlot = slot + 1);
     try {
       final bytes = await picked.readAsBytes();
       final imageUrl = await ApiService.instance.uploadListingImage(
@@ -165,7 +203,19 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
         token: auth.token,
       );
       if (!mounted) return;
-      setState(() => _imageController.text = imageUrl);
+      setState(() {
+        while (_photos.length < slot) {
+          _photos.add(''); // keep earlier empty slots stable
+        }
+        if (slot < _photos.length) {
+          _photos[slot] = imageUrl; // replacing an existing photo
+        } else {
+          _photos.add(imageUrl);
+        }
+        // The photo set changed -> any previous scan is stale.
+        _analysis = null;
+        _photos.removeWhere((url) => url.isEmpty);
+      });
       messenger.showSnackBar(
         SnackBar(
           backgroundColor: AppColors.success.withOpacity(0.92),
@@ -175,6 +225,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
           ),
         ),
       );
+      if (_photosComplete) _maybeAutoScan();
     } on ApiException catch (error) {
       if (!mounted) return;
       messenger.showSnackBar(
@@ -198,22 +249,188 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
         ),
       );
     } finally {
-      if (mounted) setState(() => _isUploading = false);
+      if (mounted) setState(() => _uploadingSlot = 0);
     }
   }
+
+  void _removePhoto(int slot) {
+    if (_isBusy) return;
+    setState(() {
+      _photos.removeAt(slot);
+      _analysis = null;
+    });
+  }
+
+  /// "Paste URL instead" escape hatch - adds a hosted image to the first
+  /// empty slot (validators keep it a real http(s) URL).
+  Future<void> _pasteUrl() async {
+    if (_isBusy || _photosComplete) return;
+    final controller = TextEditingController();
+    final url = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text(
+          'Paste image URL',
+          style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w700),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.url,
+          style:
+              const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+          decoration: const InputDecoration(hintText: 'https://...'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textMuted)),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (url == null || url.isEmpty) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a full URL (https://...)')),
+      );
+      return;
+    }
+    setState(() {
+      _photos.add(url);
+      _analysis = null;
+    });
+    if (_photosComplete) _maybeAutoScan();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Task 3: 4-photo Vision AI scan (auto after the 4th photo)
+  // ---------------------------------------------------------------------------
+
+  void _maybeAutoScan() {
+    if (_photosComplete && !_isScanning && _analysis == null) {
+      _runAiScan();
+    }
+  }
+
+  /// POST /products/analyze-images with the 4 CDN URLs, then auto-fill the
+  /// untouched fields from the strict-JSON reply.
+  Future<void> _runAiScan() async {
+    if (!_photosComplete || _isScanning) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final auth = context.read<AuthProvider>();
+    final typedTitle = _titleController.text.trim();
+    final typedDescription = _descriptionController.text.trim();
+
+    setState(() => _isScanning = true);
+    try {
+      final result = await ApiService.instance.analyzeImages(
+        imageUrls: _photos,
+        // Seller-typed values are only hints (they steer the offline
+        // heuristic fallback; a live vision model ignores them).
+        title: _titleEdited ? typedTitle : null,
+        description: _descriptionEdited ? typedDescription : null,
+        token: auth.token,
+      );
+      if (!mounted) return;
+
+      setState(() {
+        _analysis = result;
+        _autoFilling = true;
+        try {
+          if (!_titleEdited && _titleController.text.trim().isEmpty) {
+            _titleController.text = result.title;
+          }
+          if (!_descriptionEdited &&
+              _descriptionController.text.trim().isEmpty) {
+            _descriptionController.text = result.description;
+          }
+          if (_conditions.contains(result.condition)) {
+            _condition = result.condition;
+          }
+          if (!_priceEdited && _priceController.text.trim().isEmpty) {
+            _priceController.text =
+                result.listedPriceInr.toStringAsFixed(0);
+          }
+        } finally {
+          _autoFilling = false;
+        }
+      });
+
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
+          content: Text(
+            result.isLiveVision
+                ? 'AI vision scan complete (${result.source}) - listing '
+                    'auto-filled'
+                : 'AI scan complete - smart defaults applied (offline '
+                    'heuristic)',
+            style: const TextStyle(
+              color: Colors.black,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      );
+    } on ApiException catch (error) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.warning.withOpacity(0.94),
+          content: Text(
+            'AI scan unavailable: ${error.message} - you can still submit '
+            'and the price agent will run on the server.',
+            style: const TextStyle(color: Colors.black),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.warning.withOpacity(0.94),
+          content: Text(
+            'AI scan failed: $error - you can still submit.',
+            style: const TextStyle(color: Colors.black),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Submit
+  // ---------------------------------------------------------------------------
 
   Future<void> _submit() async {
     final form = _formKey.currentState;
     if (form == null || !form.validate()) return;
 
-    final imageUrl = _imageController.text.trim();
-    if (imageUrl.isEmpty) {
+    if (!_photosComplete) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: AppColors.warning.withOpacity(0.94),
-          content: const Text(
-            'Add a photo (camera or gallery) before submitting.',
-            style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700),
+          content: Text(
+            'Add all 4 photos (${_slotLabels.join(' / ')}) before '
+            'submitting - the AI vision scan needs every angle.',
+            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w700),
           ),
         ),
       );
@@ -223,6 +440,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     // Capture everything needed AFTER the await before leaving this context.
     final provider = context.read<ProductProvider>();
     final messenger = ScaffoldMessenger.of(context);
+    final analysis = _analysis;
 
     final payload = <String, dynamic>{
       'title': _titleController.text.trim(),
@@ -230,7 +448,13 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       // AI input only - never persisted to the products table.
       'age': _ageController.text.trim(),
       'condition': _condition,
-      'image_url': imageUrl,
+      'image_url': _photos.first,
+      'image_urls': _photos,
+      if (analysis != null) ...{
+        'ai_tags': analysis.tagsCsv,
+        'ai_condition_notes': analysis.conditionNotes,
+        'ai_suggested_price': analysis.suggestedPriceInr,
+      },
       'listed_price': double.parse(_priceController.text.trim()),
       // `category` omitted on purpose: the AI pipeline owns it (Phase 3).
     };
@@ -245,7 +469,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
           backgroundColor: AppColors.success.withOpacity(0.92),
           content: Text(
             'AI analysis complete - ${created.category}'
-            '${suggested == null ? '' : ' - suggested \$${suggested.toStringAsFixed(2)}'}',
+            '${suggested == null ? '' : ' - suggested ${formatInr(suggested)}'}',
             style: const TextStyle(
               color: Colors.black,
               fontWeight: FontWeight.w700,
@@ -274,11 +498,15 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     _descriptionController.clear();
     _ageController.clear();
     _priceController.clear();
-    _imageController.clear();
     setState(() {
       _condition = _conditions.first;
-      _showUrlField = false;
-      _lastSource = null;
+      _photos.clear();
+      _analysis = null;
+      _isScanning = false;
+      _uploadingSlot = 0;
+      _titleEdited = false;
+      _descriptionEdited = false;
+      _priceEdited = false;
     });
   }
 
@@ -297,17 +525,18 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             Text(
               'Sell on Campus Mart Ai',
               style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w800,
-                color: AppColors.textPrimary,
+                fontFamily: 'Georgia',
+                fontSize: 19,
+                fontWeight: FontWeight.w700,
+                color: AppColors.inkBlack,
               ),
             ),
             Text(
-              'AI-assisted pricing & safety check',
+              '4-photo AI vision scan · smart pricing & safety check',
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w500,
-                color: AppColors.cyanAccent,
+                color: AppColors.royalBlue,
               ),
             ),
           ],
@@ -327,7 +556,9 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
               32 + _bottomNavClearance + bottomInset,
             ),
             children: [
-              _buildImageSection(),
+              _buildPhotoGrid(),
+              const SizedBox(height: 12),
+              _buildScanStatus(),
               const SizedBox(height: 16),
               _AiEstimateBanner(
                 title: _titleController.text,
@@ -389,8 +620,8 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
                           const TextInputType.numberWithOptions(decimal: true),
                       decoration: const InputDecoration(
                         labelText: 'Listed Price',
-                        hintText: 'e.g. 45.00',
-                        prefixText: '\$ ',
+                        hintText: 'e.g. 450',
+                        prefixText: '₹ ',
                       ),
                       validator: (value) {
                         final price = double.tryParse((value ?? '').trim());
@@ -420,11 +651,9 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
                     : (value) =>
                         setState(() => _condition = value ?? _condition),
               ),
-              const SizedBox(height: 14),
-              _buildAdvancedUrlToggle(isSubmitting),
               const SizedBox(height: 28),
               FilledButton(
-                onPressed: isSubmitting ? null : _submit,
+                onPressed: isSubmitting || _isBusy ? null : _submit,
                 child: isSubmitting
                     ? const SizedBox(
                         width: 22,
@@ -447,283 +676,394 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     );
   }
 
-  /// "Paste URL instead" link that reveals the raw Image URL field.
-  Widget _buildAdvancedUrlToggle(bool isSubmitting) {
-    if (_showUrlField) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          TextFormField(
-            controller: _imageController,
-            enabled: !isSubmitting && !_isUploading,
-            keyboardType: TextInputType.url,
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
-              labelText: 'Image URL',
-              hintText: 'https://... (or upload a photo above)',
-              prefixIcon: Icon(Icons.link_outlined, size: 20),
-            ),
-            validator: (value) {
-              final url = (value ?? '').trim();
-              if (url.isEmpty) return 'Upload a photo or enter an image URL';
-              final uri = Uri.tryParse(url);
-              if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
-                return 'Enter a full URL (https://...)';
-              }
-              return null;
-            },
-          ),
-          const SizedBox(height: 6),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: () => setState(() => _showUrlField = false),
-              icon: const Icon(Icons.visibility_off_outlined, size: 15),
-              label: const Text('Hide URL field'),
-              style: TextButton.styleFrom(
-                foregroundColor: AppColors.textMuted,
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
+  // ---------------------------------------------------------------------------
+  // 4-slot photo grid + scan status
+  // ---------------------------------------------------------------------------
 
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: TextButton.icon(
-        onPressed: () => setState(() => _showUrlField = true),
-        icon: const Icon(Icons.link_outlined, size: 15),
-        label: const Text('Paste URL instead'),
-        style: TextButton.styleFrom(
-          foregroundColor: AppColors.textMuted,
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-        ),
-      ),
-    );
-  }
-
-  /// Photo picker with full-bleed preview once a photo is on board.
-  Widget _buildImageSection() {
-    final previewUrl = _imageController.text.trim();
-    final hasPhoto = previewUrl.isNotEmpty;
-
+  /// 2x2 grid of the 4 mandatory vision angles.
+  Widget _buildPhotoGrid() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'PHOTO',
-          style: TextStyle(
-            color: AppColors.textMuted,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.1,
-          ),
+        Row(
+          children: [
+            const Text(
+              'PHOTOS (ALL 4 REQUIRED)',
+              style: TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '${_photos.length} / 4',
+              style: TextStyle(
+                color: _photosComplete
+                    ? AppColors.success
+                    : AppColors.cyanAccent,
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
-        Container(
-          height: hasPhoto ? 230 : 160,
-          width: double.infinity,
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: hasPhoto
-                  ? AppColors.cyanAccent.withOpacity(0.4)
-                  : AppColors.hairline,
-            ),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            childAspectRatio: 1.15,
           ),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              hasPhoto
-                  ? Image.network(
-                      previewUrl,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const _ImagePlaceholder(),
-                    )
-                  : const _ImagePlaceholder(),
-
-              // Full-bleed camera / gallery chooser when empty.
-              if (!hasPhoto)
-                Positioned.fill(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      onTap: _isUploading ? null : _choosePhotoSource,
-                      child: const SizedBox.expand(),
-                    ),
-                  ),
-                ),
-
-              // "Change Photo" bar over the preview.
-              if (hasPhoto)
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: 12,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: _PhotoActionButton(
-                          label: 'Change Photo',
-                          icon: Icons.cameraswitch_outlined,
-                          filled: true,
-                          onTap: _isUploading ? null : _choosePhotoSource,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      _PhotoActionButton(
-                        label: 'Remove',
-                        icon: Icons.close,
-                        filled: false,
-                        onTap: _isUploading
-                            ? null
-                            : () => setState(() {
-                                  _imageController.clear();
-                                  _lastSource = null;
-                                }),
-                      ),
-                    ],
-                  ),
-                ),
-
-              if (_isUploading)
-                Container(
-                  color: AppColors.voidBlack.withOpacity(0.65),
-                  alignment: Alignment.center,
-                  child: const Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      SizedBox(
-                        width: 26,
-                        height: 26,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.6,
-                          color: AppColors.cyanAccent,
-                        ),
-                      ),
-                      SizedBox(height: 10),
-                      Text(
-                        'Uploading to cloud...',
-                        style: TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
+          itemCount: _slotLabels.length,
+          itemBuilder: (context, index) => _buildPhotoSlot(index),
         ),
         const SizedBox(height: 8),
         Text(
-          hasPhoto
-              ? 'Photo ready$_sourceHint — tap Change Photo to replace it.'
-              : 'Take a photo with the camera or pick one from your gallery.',
+          _photosComplete
+              ? 'All 4 angles captured - the AI scans them together for '
+                  'category, condition and fair price.'
+              : 'Capture Front, Back, Side and a Label close-up. The AI '
+                  'vision scan needs all 4 angles.',
           style: const TextStyle(
             color: AppColors.textMuted,
             fontSize: 11.5,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _photosComplete || _isBusy ? null : _pasteUrl,
+            icon: const Icon(Icons.link_outlined, size: 15),
+            label: const Text('Paste URL instead'),
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.textMuted,
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+            ),
           ),
         ),
       ],
     );
   }
 
-  String get _sourceHint {
-    switch (_lastSource) {
-      case ImageSource.camera:
-        return ' (from camera)';
-      case ImageSource.gallery:
-        return ' (from gallery)';
-      case null:
-        return '';
-    }
-  }
-}
+  /// One angle tile: photo preview + remove, or an "add" placeholder.
+  Widget _buildPhotoSlot(int index) {
+    final hasPhoto = index < _photos.length && _photos[index].isNotEmpty;
+    final uploading = _uploadingSlot == index + 1;
 
-/// Small overlay button used on the photo preview.
-class _PhotoActionButton extends StatelessWidget {
-  const _PhotoActionButton({
-    required this.label,
-    required this.icon,
-    required this.filled,
-    required this.onTap,
-  });
-
-  final String label;
-  final IconData icon;
-  final bool filled;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
     return Material(
-      color: Colors.transparent,
+      color: AppColors.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          color: hasPhoto
+              ? AppColors.cyanAccent.withOpacity(0.45)
+              : AppColors.hairline,
+          width: 1.2,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          height: 40,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: filled
-                ? AppColors.cyanAccent
-                : Colors.black.withOpacity(0.72),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: filled
-                  ? AppColors.cyanAccent
-                  : Colors.white.withOpacity(0.35),
+        onTap: _isBusy
+            ? null
+            : () => hasPhoto ? _replacePhoto(index) : _choosePhotoSource(index),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (hasPhoto)
+              Image.network(
+                _photos[index],
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    _SlotPlaceholder(label: _slotLabels[index]),
+              )
+            else
+              _SlotPlaceholder(label: _slotLabels[index]),
+
+            // Slot number / label strip.
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                color: Colors.black.withOpacity(0.62),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${index + 1}. ${_slotLabels[index]}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    if (hasPhoto && !_isBusy)
+                      GestureDetector(
+                        onTap: () => _removePhoto(index),
+                        child: const Icon(Icons.close,
+                            size: 15, color: Colors.white70),
+                      ),
+                  ],
+                ),
+              ),
             ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 16, color: filled ? Colors.black : Colors.white),
-              const SizedBox(width: 6),
-              Text(
-                label,
+
+            if (uploading)
+              Container(
+                color: AppColors.voidBlack.withOpacity(0.7),
+                alignment: Alignment.center,
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.4,
+                        color: AppColors.cyanAccent,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Uploading...',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Tap-to-replace sheet for a filled slot.
+  Future<void> _replacePhoto(int index) async {
+    if (_isBusy) return;
+    final label = _slotLabels[index];
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+              child: Text(
+                'REPLACE PHOTO: ${label.toUpperCase()}',
+                style: const TextStyle(
+                  color: AppColors.textMuted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined,
+                  color: AppColors.cyanAccent),
+              title: const Text('Take a photo',
+                  style: TextStyle(color: AppColors.textPrimary)),
+              onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined,
+                  color: AppColors.cyanAccent),
+              title: const Text('Choose from gallery',
+                  style: TextStyle(color: AppColors.textPrimary)),
+              onTap: () => Navigator.of(sheetContext).pop(ImageSource.gallery),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (source != null) await _pickAndUploadImage(source, index);
+  }
+
+  /// Scan progress / result strip shown under the grid.
+  Widget _buildScanStatus() {
+    final analysis = _analysis;
+
+    if (_isScanning) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.cyanAccent.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppColors.cyanAccent.withOpacity(0.4)),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.4,
+                color: AppColors.cyanAccent,
+              ),
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'AI vision scanning all 4 photos - category, condition, '
+                'tags and fair price incoming...',
                 style: TextStyle(
-                  color: filled ? Colors.black : Colors.white,
+                  color: AppColors.textPrimary,
                   fontSize: 12.5,
-                  fontWeight: FontWeight.w800,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (analysis == null) {
+      if (!_photosComplete) return const SizedBox.shrink();
+      return OutlinedButton.icon(
+        onPressed: _runAiScan,
+        icon: const Icon(Icons.auto_awesome, size: 16),
+        label: const Text('Run AI Photo Scan'),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.cyanAccent,
+          side: BorderSide(color: AppColors.cyanAccent.withOpacity(0.5)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+    }
+
+    final rangeLabel = analysis.priceMinInr > 0
+        ? '${formatInr(analysis.priceMinInr)} – ${formatInr(analysis.priceMaxInr)}'
+        : formatInr(analysis.suggestedPriceInr);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.success.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.success.withOpacity(0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.check_circle, size: 15, color: AppColors.success),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  analysis.isLiveVision
+                      ? 'AI vision scan complete (${analysis.source})'
+                      : 'AI scan complete (offline heuristic)',
+                  style: const TextStyle(
+                    color: AppColors.success,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
             ],
           ),
-        ),
+          const SizedBox(height: 7),
+          if ((analysis.brand ?? '').isNotEmpty) ...[
+            Text(
+              '${analysis.brand}'
+              '${(analysis.modelName ?? '').isEmpty ? '' : ' ${analysis.modelName}'}'
+              ' · ${analysis.category} · ${analysis.condition}',
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 5),
+          ],
+          if (analysis.conditionNotes.isNotEmpty) ...[
+            Text(
+              analysis.conditionNotes,
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 5),
+          ],
+          Text(
+            'AI fair range $rangeLabel · suggested '
+            '${formatInr(analysis.suggestedPriceInr)}',
+            style: const TextStyle(
+              color: AppColors.cyanAccent,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Tags: ${analysis.tagsCsv}',
+            style: const TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 11,
+              height: 1.35,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// Empty-state shown before a photo is picked.
-class _ImagePlaceholder extends StatelessWidget {
-  const _ImagePlaceholder();
+/// Empty / error state inside one photo slot (with its angle label).
+class _SlotPlaceholder extends StatelessWidget {
+  const _SlotPlaceholder({required this.label});
+
+  final String label;
 
   @override
   Widget build(BuildContext context) {
-    return const Column(
+    return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Icon(Icons.add_a_photo_outlined, size: 30, color: AppColors.textMuted),
-        SizedBox(height: 8),
+        const Icon(Icons.add_a_photo_outlined,
+            size: 26, color: AppColors.textMuted),
+        const SizedBox(height: 7),
         Text(
-          'Tap to add a photo',
-          style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+          label,
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
         ),
-        SizedBox(height: 4),
-        Text(
-          'Camera or gallery',
-          style: TextStyle(color: AppColors.textMuted, fontSize: 11),
+        const SizedBox(height: 3),
+        const Text(
+          'Tap to add',
+          style: TextStyle(color: AppColors.textMuted, fontSize: 10.5),
         ),
       ],
     );
@@ -734,7 +1074,7 @@ class _ImagePlaceholder extends StatelessWidget {
 ///
 /// Re-uses [AiPriceEstimate], the client mirror of the backend price agent,
 /// so the range students see updates as they type the title, age and pick a
-/// condition - before anything is submitted.
+/// condition - before anything is submitted. All figures are in INR.
 class _AiEstimateBanner extends StatelessWidget {
   const _AiEstimateBanner({
     required this.title,
@@ -807,8 +1147,7 @@ class _AiEstimateBanner extends StatelessWidget {
                   ),
                 ),
                 TextSpan(
-                  text:
-                      '\$${range.low.toStringAsFixed(2)} – \$${range.high.toStringAsFixed(2)}',
+                  text: '${formatInr(range.low)} – ${formatInr(range.high)}',
                   style: const TextStyle(
                     color: AppColors.textPrimary,
                     fontSize: 16,

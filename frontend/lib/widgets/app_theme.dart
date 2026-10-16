@@ -1,65 +1,101 @@
 import 'package:flutter/material.dart';
 
-/// CampusMart "deep void" design tokens: dark surfaces, subtle cyan accents,
-/// and hairline borders. Single source of truth for the whole UI.
+/// CampusMart "Warm Paper" design tokens (image_28.png):
+///   Main Background: Warm Paper-Cream (#FAF9F6)
+///   Card/Surface Backgrounds: Crisp White (#FFFFFF)
+///   Primary Buttons, Headers & Dark text: Deep Ink-Black (#141413)
+///   Soft Elements (Input boxes, disabled state): Stone-Sand Gray (#F3F2EE or #EFEFE9)
+///   Primary Highlight: Subtle Royal Blue (#2563EB)
+///   Verified & Badge Accents: Matte Forest Green (#15803D) and soft amber (#D97706)
 abstract final class AppColors {
-  /// App background (deep void black with a blue undertone).
-  static const Color voidBlack = Color(0xFF0A0E14);
+  /// Main Background: Warm Paper-Cream (#FAF9F6).
+  static const Color background = Color(0xFFFAF9F6);
+  static const Color warmCream = Color(0xFFFAF9F6);
 
-  /// Cards, fields, and the bottom nav bar.
-  static const Color surface = Color(0xFF111826);
+  /// Backward-compatibility alias so all existing views inherit Warm Paper-Cream:
+  static const Color voidBlack = Color(0xFFFAF9F6);
 
-  /// Elevated/pressed variants and meter tracks.
-  static const Color surfaceHigh = Color(0xFF1A2437);
+  /// Card/Surface Backgrounds: Crisp White (#FFFFFF).
+  static const Color surface = Color(0xFFFFFFFF);
 
-  /// Primary accent (subtle cyan).
-  static const Color cyanAccent = Color(0xFF22D3EE);
+  /// Soft Elements (Input boxes, disabled state, meter tracks): Stone-Sand Gray (#F3F2EE).
+  static const Color surfaceHigh = Color(0xFFF3F2EE);
+  static const Color stoneSand = Color(0xFFF3F2EE);
+  static const Color softGray = Color(0xFFEFEFE9);
 
-  static const Color textPrimary = Color(0xFFE8EDF5);
-  static const Color textMuted = Color(0xFF8A94A6);
+  /// Primary Buttons, Headers & Dark text: Deep Ink-Black (#141413).
+  static const Color inkBlack = Color(0xFF141413);
+  static const Color textPrimary = Color(0xFF141413);
 
-  /// 12%-white hairline used for all borders/dividers.
-  static const Color hairline = Color(0x1FFFFFFF);
+  /// Muted body text / subtitles: refined charcoal (#6B7280).
+  static const Color textMuted = Color(0xFF6B7280);
 
-  static const Color success = Color(0xFF34D399);
-  static const Color warning = Color(0xFFFBBF24);
-  static const Color danger = Color(0xFFF87171);
+  /// Primary Highlight: Subtle Royal Blue (#2563EB).
+  static const Color royalBlue = Color(0xFF2563EB);
+
+  /// Backward-compatibility alias so highlight references use Subtle Royal Blue:
+  static const Color cyanAccent = Color(0xFF2563EB);
+
+  /// Hairline borders / dividers: warm stone hairline (#E5E5DF).
+  static const Color hairline = Color(0xFFE5E5DF);
+
+  /// Verified & Badge Accents: Matte Forest Green (#15803D).
+  static const Color success = Color(0xFF15803D);
+  static const Color forestGreen = Color(0xFF15803D);
+
+  /// Soft amber accent (#D97706).
+  static const Color warning = Color(0xFFD97706);
+  static const Color softAmber = Color(0xFFD97706);
+
+  /// Error/danger accent (#DC2626).
+  static const Color danger = Color(0xFFDC2626);
 }
 
-/// Central dark theme for the app.
+/// Central Warm Paper theme for the app.
 abstract final class AppTheme {
-  static ThemeData get dark {
+  static ThemeData get paper {
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: AppColors.cyanAccent,
-        brightness: Brightness.dark,
+      brightness: Brightness.light,
+      colorScheme: const ColorScheme.light(
+        primary: AppColors.royalBlue,
+        secondary: AppColors.forestGreen,
+        surface: AppColors.surface,
+        onSurface: AppColors.textPrimary,
+        error: AppColors.danger,
       ),
-      scaffoldBackgroundColor: AppColors.voidBlack,
+      scaffoldBackgroundColor: AppColors.background,
       appBarTheme: const AppBarTheme(
-        backgroundColor: AppColors.voidBlack,
+        backgroundColor: AppColors.background,
+        foregroundColor: AppColors.inkBlack,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
+        titleTextStyle: TextStyle(
+          fontFamily: 'Georgia',
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+          color: AppColors.inkBlack,
+          letterSpacing: -0.3,
+        ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: AppColors.surface,
+        fillColor: AppColors.surfaceHigh,
         hintStyle: const TextStyle(color: AppColors.textMuted),
         labelStyle: const TextStyle(color: AppColors.textMuted),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: _inputBorder(),
         enabledBorder: _inputBorder(),
-        focusedBorder: _inputBorder(color: AppColors.cyanAccent, width: 1.4),
+        focusedBorder: _inputBorder(color: AppColors.royalBlue, width: 1.5),
         errorBorder: _inputBorder(color: AppColors.danger),
         focusedErrorBorder:
-            _inputBorder(color: AppColors.danger, width: 1.4),
+            _inputBorder(color: AppColors.danger, width: 1.5),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          backgroundColor: AppColors.cyanAccent,
-          foregroundColor: Colors.black,
+          backgroundColor: AppColors.inkBlack,
+          foregroundColor: Colors.white,
           minimumSize: const Size.fromHeight(52),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
@@ -72,14 +108,15 @@ abstract final class AppTheme {
       ),
       bottomNavigationBarTheme: const BottomNavigationBarThemeData(
         backgroundColor: AppColors.surface,
-        selectedItemColor: AppColors.cyanAccent,
+        selectedItemColor: AppColors.royalBlue,
         unselectedItemColor: AppColors.textMuted,
         type: BottomNavigationBarType.fixed,
+        elevation: 4,
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
-        backgroundColor: AppColors.surfaceHigh,
-        contentTextStyle: const TextStyle(color: AppColors.textPrimary),
+        backgroundColor: AppColors.inkBlack,
+        contentTextStyle: const TextStyle(color: Colors.white),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
         ),
@@ -90,6 +127,9 @@ abstract final class AppTheme {
       ),
     );
   }
+
+  /// Alias so callers accessing dark inherit the Warm Paper design:
+  static ThemeData get dark => paper;
 
   /// Shared hairline outline for text fields.
   static OutlineInputBorder _inputBorder({

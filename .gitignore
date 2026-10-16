@@ -34,3 +34,6 @@ frontend/.flutter-plugins
 frontend/.flutter-plugins-dependencies
 frontend/android/.gradle/
 frontend/ios/Pods/
+desktop.ini
+**/desktop.ini
+

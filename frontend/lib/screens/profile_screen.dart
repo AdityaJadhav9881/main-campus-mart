@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/product.dart';
@@ -6,6 +7,7 @@ import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
 import '../providers/wishlist_provider.dart';
 import '../services/api_service.dart';
+import '../services/currency.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/category_icon.dart';
 import '../widgets/trust_score_meter.dart';
@@ -236,8 +238,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         title: const Text(
           'Profile & Campus Trust',
           style: TextStyle(
-            fontSize: 17,
-            fontWeight: FontWeight.w800,
+            fontFamily: 'Georgia',
+            fontSize: 19,
+            fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
           ),
         ),
@@ -316,6 +319,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   );
                 },
               ),
+              const SizedBox(height: 20),
+              const _HelpAndSupportCard(),
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
@@ -817,7 +822,7 @@ class _MyListingsTab extends StatelessWidget {
                         Row(
                           children: [
                             Text(
-                              '\$${product.listedPrice.toStringAsFixed(2)}'
+                              '${formatInr(product.listedPrice)}'
                               ' · ${product.condition}',
                               style: const TextStyle(
                                 color: AppColors.textMuted,
@@ -946,7 +951,7 @@ class _PurchasedTab extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Paid \$${record.finalPrice.toStringAsFixed(2)}'
+                        'Paid ${formatInr(record.finalPrice)}'
                         '${record.sellerName == null ? '' : ' · from ${record.sellerName}'}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -1065,7 +1070,7 @@ class _SavedTab extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        '\$${product.listedPrice.toStringAsFixed(2)}',
+                        formatInr(product.listedPrice),
                         style: const TextStyle(
                           color: AppColors.cyanAccent,
                           fontSize: 13,
@@ -1114,3 +1119,168 @@ class _EmptyTab extends StatelessWidget {
     );
   }
 }
+
+/// Official administration & student help support card.
+class _HelpAndSupportCard extends StatelessWidget {
+  const _HelpAndSupportCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: AppColors.royalBlue.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.support_agent_outlined,
+                  size: 20,
+                  color: AppColors.royalBlue,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Help & Official Support',
+                      style: TextStyle(
+                        fontFamily: 'Georgia',
+                        color: AppColors.inkBlack,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Direct line to marketplace administration',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const Divider(height: 1),
+          const SizedBox(height: 12),
+          InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () {
+              Clipboard.setData(
+                const ClipboardData(text: 'martaicampus@gmail.com'),
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'Support email copied: martaicampus@gmail.com',
+                  ),
+                ),
+              );
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.email_outlined,
+                    size: 16,
+                    color: AppColors.royalBlue,
+                  ),
+                  SizedBox(width: 10),
+                  Text(
+                    'Support Email:',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'martaicampus@gmail.com',
+                      style: TextStyle(
+                        color: AppColors.royalBlue,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Icon(Icons.copy, size: 15, color: AppColors.textMuted),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () {
+              Clipboard.setData(
+                const ClipboardData(text: 'support@campusmart.in'),
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'Support email copied: support@campusmart.in',
+                  ),
+                ),
+              );
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.alternate_email,
+                    size: 16,
+                    color: AppColors.textMuted,
+                  ),
+                  SizedBox(width: 10),
+                  Text(
+                    'General Desk:',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'support@campusmart.in',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Icon(Icons.copy, size: 15, color: AppColors.textMuted),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+

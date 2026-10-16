@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/product.dart';
 import '../providers/product_provider.dart';
+import '../services/currency.dart';
 import '../services/recommendations.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/product_card.dart';
@@ -56,6 +59,14 @@ class _FeedScreenState extends State<FeedScreen> {
   String _category = 'All';
   String _sort = 'newest';
 
+  /// Debounce for the server-side `?q=` search (fires after typing pauses).
+  Timer? _searchDebounce;
+
+  /// Render-free warmup timer: if the very first load is still empty after
+  /// 3s, swap the plain spinner for the "waking up our cloud AI server" card.
+  Timer? _warmupTimer;
+  bool _warmupVisible = false;
+
   @override
   void initState() {
     super.initState();
@@ -64,6 +75,7 @@ class _FeedScreenState extends State<FeedScreen> {
       if (!mounted) return;
       final provider = context.read<ProductProvider>();
       if (provider.products.isEmpty && !provider.isLoading) {
+        _scheduleWarmup();
         provider.loadProducts();
       }
     });
@@ -71,8 +83,33 @@ class _FeedScreenState extends State<FeedScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
+    _warmupTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  /// Starts the 3s warmup countdown for a cold feed request.
+  void _scheduleWarmup() {
+    _warmupTimer?.cancel();
+    _warmupTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      final provider = context.read<ProductProvider>();
+      if (provider.isLoading && provider.products.isEmpty) {
+        setState(() => _warmupVisible = true);
+      }
+    });
+  }
+
+  /// Debounced server-side search: replaces the feed with matching listings
+  /// (server `?q=` also matches AI tags + category, beyond the local filter).
+  void _onSearchChanged(String value) {
+    setState(() => _query = value);
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      context.read<ProductProvider>().loadProducts(query: value);
+    });
   }
 
   /// Categories for the chip row: `All` + every category actually present in
@@ -224,19 +261,23 @@ class _FeedScreenState extends State<FeedScreen> {
             SizedBox(width: 10),
             Text.rich(
               TextSpan(
+                style: TextStyle(
+                  fontFamily: 'Georgia',
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
                 children: [
                   TextSpan(
-                    text: 'Campus',
+                    text: 'Campus Mart',
                     style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontWeight: FontWeight.w800,
+                      color: AppColors.inkBlack,
                     ),
                   ),
                   TextSpan(
-                    text: ' Mart Ai',
+                    text: ' Ai',
                     style: TextStyle(
-                      color: AppColors.cyanAccent,
-                      fontWeight: FontWeight.w800,
+                      color: AppColors.royalBlue,
                     ),
                   ),
                 ],
@@ -250,7 +291,7 @@ class _FeedScreenState extends State<FeedScreen> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: TextField(
               controller: _searchController,
-              onChanged: (value) => setState(() => _query = value),
+              onChanged: _onSearchChanged,
               style: const TextStyle(color: AppColors.textPrimary),
               decoration: InputDecoration(
                 hintText: 'Search campus listings...',
@@ -268,8 +309,10 @@ class _FeedScreenState extends State<FeedScreen> {
                           size: 18,
                         ),
                         onPressed: () {
+                          _searchDebounce?.cancel();
                           _searchController.clear();
                           setState(() => _query = '');
+                          context.read<ProductProvider>().loadProducts(query: '');
                         },
                       ),
               ),
@@ -314,7 +357,14 @@ class _FeedScreenState extends State<FeedScreen> {
                   selected: selected,
                   showCheckmark: false,
                   visualDensity: VisualDensity.compact,
-                  onSelected: (_) => setState(() => _category = category),
+                  onSelected: (_) {
+                    setState(() => _category = category);
+                    // Chips also re-query the server so `?category=` SQL
+                    // filtering backs the local pass.
+                    context
+                        .read<ProductProvider>()
+                        .loadProducts(category: category == 'All' ? '' : category);
+                  },
                   selectedColor: AppColors.cyanAccent,
                   backgroundColor: AppColors.surface,
                   side: const BorderSide(color: AppColors.hairline),
@@ -389,9 +439,11 @@ class _FeedScreenState extends State<FeedScreen> {
         !provider.isLoading;
 
     if (showLoader) {
-      return const Center(
-        child: CircularProgressIndicator(color: AppColors.cyanAccent),
-      );
+      return _warmupVisible
+          ? const _WakeUpCard()
+          : const Center(
+              child: CircularProgressIndicator(color: AppColors.cyanAccent),
+            );
     }
     if (showError) {
       return _FeedMessage(
@@ -399,7 +451,7 @@ class _FeedScreenState extends State<FeedScreen> {
         title: 'Could not reach the marketplace',
         message: provider.errorMessage ?? 'Unknown error',
         actionLabel: 'Retry',
-        onAction: provider.loadProducts,
+        onAction: () => _retryFeed(provider),
       );
     }
 
@@ -409,7 +461,10 @@ class _FeedScreenState extends State<FeedScreen> {
     return RefreshIndicator(
       color: AppColors.cyanAccent,
       backgroundColor: AppColors.surface,
-      onRefresh: provider.loadProducts,
+      onRefresh: () async {
+        _scheduleWarmup();
+        await provider.loadProducts();
+      },
       child: noMatches
           ? _FeedMessage(
               icon: Icons.search_off_outlined,
@@ -419,14 +474,18 @@ class _FeedScreenState extends State<FeedScreen> {
                       'Refresh to check for new campus listings.'
                   : 'Pull down to refresh, or sell the first item!',
               actionLabel: 'Refresh Feed',
-              onAction: provider.loadProducts,
+              onAction: () => _retryFeed(provider),
               secondaryLabel: 'Clear filters',
               onSecondaryAction: () {
+                _searchDebounce?.cancel();
                 _searchController.clear();
                 setState(() {
                   _query = '';
                   _category = 'All';
                 });
+                context
+                    .read<ProductProvider>()
+                    .loadProducts(query: '', category: '');
               },
             )
           : GridView.builder(
@@ -451,6 +510,61 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   String get _queryHint => _query.isEmpty ? '' : ' "$_query"';
+
+  /// Restarts the warmup countdown and refetches (all retry entry points).
+  void _retryFeed(ProductProvider provider) {
+    _scheduleWarmup();
+    provider.loadProducts();
+  }
+}
+
+/// Cold-start card shown while a slow first load (>3s) is still pending.
+/// Task 4's Render warm-start UX: honest progress copy, no server internals.
+class _WakeUpCard extends StatelessWidget {
+  const _WakeUpCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 36),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 46,
+              height: 46,
+              child: CircularProgressIndicator(
+                strokeWidth: 3.5,
+                color: AppColors.cyanAccent,
+              ),
+            ),
+            SizedBox(height: 22),
+            Text(
+              'Connecting to Campus Mart Ai Marketplace',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 15.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Hang tight! Waking up our cloud AI server (takes ~30-60 '
+              'seconds on first launch)...',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12.5,
+                height: 1.45,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// Horizontal "✨ AI Recommended For You" rail.
@@ -601,7 +715,7 @@ class _RecommendationCard extends StatelessWidget {
                       children: [
                         Expanded(
                           child: Text(
-                            '\$${product.listedPrice.toStringAsFixed(2)}',
+                            formatInr(product.listedPrice),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -658,13 +772,13 @@ class _AiPickBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        color: AppColors.cyanAccent.withOpacity(0.95),
+        color: AppColors.royalBlue,
         borderRadius: BorderRadius.circular(6),
       ),
       child: const Text(
         'AI PICK',
         style: TextStyle(
-          color: Colors.black,
+          color: Colors.white,
           fontSize: 8,
           fontWeight: FontWeight.w900,
           letterSpacing: 0.4,

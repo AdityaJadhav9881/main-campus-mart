@@ -13,11 +13,12 @@ Purchase flow + student purchase history (Phase 7).
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
-from ..auth import extract_uid, verify_firebase_token
+from ..auth import account_terminated, extract_uid, verify_firebase_token
 from ..database import get_db
+from ..email_service import send_product_sold_emails
 from ..models import Product, Transaction, User
 from ..schemas import MyTransactionsResponse, PurchaseResponse, TransactionRead
 
@@ -48,6 +49,7 @@ def _load_user(db: Session, firebase_uid: str) -> User:
 )
 def purchase_product(
     product_id: UUID,
+    background: BackgroundTasks,
     token: dict = Depends(verify_firebase_token),
     db: Session = Depends(get_db),
 ) -> PurchaseResponse:
@@ -60,14 +62,13 @@ def purchase_product(
            buyer is the seller (cannot buy your own item).
         4. Insert a completed Transaction at the listed price.
         5. product.status = 'sold'; seller.trust_score += 0.1 (cap 5.0).
+        6. Queue BOTH Brevo sale emails (seller "Sold!" + buyer "Order
+           Confirmed") as a background task - non-blocking by design.
     """
     buyer = _load_user(db, extract_uid(token))
 
     if buyer.status == "blocked":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been blocked and cannot make purchases.",
-        )
+        raise account_terminated()
 
     product = (
         db.query(Product)
@@ -107,13 +108,35 @@ def purchase_product(
     db.commit()
     db.refresh(transaction)
 
+    # Detach-safe: the sale emails run as a BackgroundTask AFTER this
+    # request's session closes, and commit() expired every ORM object above.
+    # Reloading each row while the session is still open keeps its scalar
+    # attributes readable once the rows are detached.
+    db.refresh(product)
+    seller = product.seller          # lazy re-load while the session is open
+    if seller is not None:
+        db.refresh(seller)
+    db.refresh(buyer)
+
     logger.info(
-        "Purchase: %s bought '%s' for $%.2f (seller trust -> %s)",
+        "Purchase: %s bought '%s' for ₹%.2f (seller trust -> %s)",
         buyer.email,
         product.title,
         transaction.final_price,
-        product.seller.trust_score if product.seller else "n/a",
+        seller.trust_score if seller is not None else "n/a",
     )
+
+    # Task: "Product Sold" emails - queued so checkout never waits on Brevo
+    # (email_service never raises; offline tests clear BREVO_API_KEY).
+    if seller is not None:
+        background.add_task(
+            send_product_sold_emails,
+            seller,
+            buyer,
+            product,
+            transaction.final_price,
+        )
+
     return PurchaseResponse(
         transaction_id=transaction.id,
         product_id=product.id,

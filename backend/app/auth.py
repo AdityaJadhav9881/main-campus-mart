@@ -34,11 +34,15 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
 # Aliased so `verify_id_token` reads clearly and never collides with THIS
 # module's name (app/auth.py):
 from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials
 from firebase_admin.exceptions import FirebaseError
+
+from .database import get_db
+from .models import User
 
 logger = logging.getLogger(__name__)
 
@@ -241,8 +245,69 @@ def init_firebase() -> None:
 # when the Authorization header is completely missing.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+# -----------------------------------------------------------------------------
+# Blocked-account enforcement (production upgrade - Task 4)
+# -----------------------------------------------------------------------------
+# One canonical 403 body for EVERY terminated account, on every endpoint.
+# The Flutter client string-matches the `ACCOUNT_TERMINATED:` prefix from any
+# API call and immediately locks the app behind a non-dismissible modal, so the
+# wording must stay identical everywhere (login, profile, chat, listings...).
+ACCOUNT_TERMINATED_DETAIL = (
+    "ACCOUNT_TERMINATED: Your access has been terminated. "
+    "Please contact Administration."
+)
 
-def verify_firebase_token(token: str = Depends(oauth2_scheme)) -> dict:
+
+def account_terminated() -> HTTPException:
+    """Build the canonical 403 used whenever a blocked student hits the API."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=ACCOUNT_TERMINATED_DETAIL,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Super-Administrator protection (production upgrade - unblock safety)
+# -----------------------------------------------------------------------------
+# The official Campus Mart Ai administration account is never blockable:
+# PATCH /admin/users/{user_id}/status refuses status='blocked' for it, and
+# every server boot (main.lifespan) + seed_db run re-asserts status='active'
+# on the live Neon row - so a mis-click can never lock the last admin out of
+# the dashboard.
+SUPER_ADMIN_EMAIL = "martaicampus@gmail.com"
+PROTECTED_ADMIN_EMAILS: frozenset[str] = frozenset(
+    {"martaicampus@gmail.com", "aditya.jadhav@campus.edu"}
+)
+
+
+def is_super_admin(email: str | None) -> bool:
+    """True when `email` is the protected Super-Administrator account."""
+    return bool(email) and email.strip().lower() in PROTECTED_ADMIN_EMAILS
+
+
+def reject_if_blocked(claims: dict, db: Session) -> None:
+    """Raise 403 ACCOUNT_TERMINATED when the token's owner is blocked.
+
+    Called at the end of `verify_firebase_token()` so a terminated student is
+    rejected on EVERY authenticated endpoint the instant the Master Admin
+    flips their status — no router can forget the check.
+
+    Unknown identities (no `users` row yet, e.g. the dev mock token or a
+    brand-new signup) are allowed through: profile creation still has to work.
+    """
+    uid = claims.get("uid") or claims.get("user_id")
+    if not uid:
+        return  # extract_uid() will raise 401 for endpoints that need it
+    user = db.query(User).filter(User.firebase_uid == str(uid)).first()
+    if user is not None and user.status == "blocked":
+        logger.warning("Blocked account rejected: %s", user.email)
+        raise account_terminated()
+
+
+def verify_firebase_token(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> dict:
     """FastAPI dependency: validate the caller's Bearer token.
 
     Accepts EITHER token type through one contract:
@@ -259,6 +324,7 @@ def verify_firebase_token(token: str = Depends(oauth2_scheme)) -> dict:
 
     Raises:
         HTTPException 401: token missing, malformed, expired, bad signature.
+        HTTPException 403: the account has been terminated (ACCOUNT_TERMINATED).
         HTTPException 503: Firebase not configured and token is not a local JWT.
     """
     # -------------------------------------------------------------------------
@@ -269,17 +335,20 @@ def verify_firebase_token(token: str = Depends(oauth2_scheme)) -> dict:
             "AUTH_DEV_BYPASS is ON: accepted a mock token WITHOUT Firebase "
             "verification (local development only - disable before deploying)."
         )
-        return {
+        claims = {
             "uid": "dev-mock-user",
             "email": "demo.student@campus.edu",
             "name": "Demo Student",
         }
+        reject_if_blocked(claims, db)
+        return claims
 
     # -------------------------------------------------------------------------
     # Phase 7: local JWT first (campus email/password auth)
     # -------------------------------------------------------------------------
     local_claims = _decode_local_jwt(token)
     if local_claims is not None:
+        reject_if_blocked(local_claims, db)
         return local_claims
 
     # -------------------------------------------------------------------------
@@ -305,7 +374,6 @@ def verify_firebase_token(token: str = Depends(oauth2_scheme)) -> dict:
         # Core requirement: verify signature, expiry, audience and issuer
         # against Google's public certificates.
         decoded_token = firebase_auth.verify_id_token(token)
-        return decoded_token
     except (ValueError, FirebaseError) as exc:
         # ValueError    -> malformed / expired / bad signature / wrong audience
         # FirebaseError -> backend-side certificate fetch or SDK failure.
@@ -317,6 +385,9 @@ def verify_firebase_token(token: str = Depends(oauth2_scheme)) -> dict:
             detail="Invalid or expired authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    reject_if_blocked(decoded_token, db)
+    return decoded_token
 
 
 def extract_uid(decoded_token: dict) -> str:

@@ -17,7 +17,7 @@ SECURITY MODEL
 from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 from sqlalchemy.orm import Session
 
-from ..auth import extract_uid, verify_firebase_token
+from ..auth import account_terminated, extract_uid, verify_firebase_token
 from ..database import get_db
 from ..models import User
 from ..schemas import UserCreate, UserRead
@@ -81,7 +81,13 @@ def get_user(
     ),
     db: Session = Depends(get_db),
 ) -> User:
-    """Public profile lookup - trust scores are public on the marketplace."""
+    """Public profile lookup - trust scores are public on the marketplace.
+
+    Task 4: a TERMINATED (blocked) account answers 403
+    `ACCOUNT_TERMINATED: ...` here too - the app fetches this profile on boot,
+    so that response is what trips the client's non-dismissible lock screen
+    for a student whose access the Master Admin revoked.
+    """
     user = (
         db.query(User).filter(User.firebase_uid == firebase_uid).first()
     )
@@ -90,4 +96,6 @@ def get_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+    if user.status == "blocked":
+        raise account_terminated()
     return user
