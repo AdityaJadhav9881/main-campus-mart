@@ -55,19 +55,59 @@ BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 # Short budget: emails run as FastAPI BackgroundTasks - never hold a response.
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-# Brand palette (inline-styled HTML - Brevo renders plain HTML only).
-_BRAND = "#4f46e5"        # indigo - matches the marketplace accent
-_BRAND_DARK = "#3730a3"
-_SURFACE = "#f8fafc"
-_TEXT = "#0f172a"
-_MUTED = "#64748b"
-_SUCCESS = "#16a34a"
-_WARN = "#d97706"
+
+def get_brevo_config(db=None) -> tuple[str, str, str]:
+    """Resolve (api_key, sender_email, sender_name) with fallback to SystemConfig."""
+    global BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME
+    api_key = BREVO_API_KEY
+    sender_email = BREVO_SENDER_EMAIL or "martaicampus@gmail.com"
+    sender_name = BREVO_SENDER_NAME or "Campus Mart Ai"
+
+    if not api_key:
+        try:
+            from .database import SessionLocal
+            from .models import SystemConfig
+
+            local_session = False
+            session = db
+            if session is None:
+                session = SessionLocal()
+                local_session = True
+            try:
+                row = (
+                    session.query(SystemConfig)
+                    .filter(SystemConfig.key == "brevo_api_key")
+                    .first()
+                )
+                if row and row.value:
+                    api_key = row.value.strip()
+                row_email = (
+                    session.query(SystemConfig)
+                    .filter(SystemConfig.key == "brevo_sender_email")
+                    .first()
+                )
+                if row_email and row_email.value:
+                    sender_email = row_email.value.strip()
+                row_name = (
+                    session.query(SystemConfig)
+                    .filter(SystemConfig.key == "brevo_sender_name")
+                    .first()
+                )
+                if row_name and row_name.value:
+                    sender_name = row_name.value.strip()
+            finally:
+                if local_session:
+                    session.close()
+        except Exception as err:
+            logger.debug("SystemConfig lookup for Brevo credentials: %s", err)
+
+    return api_key, sender_email, sender_name
 
 
 def email_enabled() -> bool:
     """True when a Brevo API key is configured (tests clear it offline)."""
-    return bool(BREVO_API_KEY)
+    api_key, _, _ = get_brevo_config()
+    return bool(api_key)
 
 
 def _inr(value: float | None) -> str:
@@ -78,6 +118,17 @@ def _inr(value: float | None) -> str:
     if amount.is_integer():
         return f"₹{amount:,.0f}"
     return f"₹{amount:,.2f}"
+
+
+# Design tokens matching Campus Mart Ai Warm Paper theme
+_BRAND = "#2563eb"       # Royal Blue
+_BRAND_DARK = "#1d4ed8"  # Darker Royal Blue for gradient
+_SURFACE = "#faf9f6"     # Warm Paper Cream
+_TEXT = "#141413"        # Ink Black
+_MUTED = "#6b7280"       # Muted Gray
+_WARN = "#d97706"        # Amber
+_SUCCESS = "#15803d"     # Matte Forest Green
+_DANGER = "#dc2626"      # Danger Red
 
 
 # =============================================================================
@@ -173,7 +224,9 @@ def _send_email(to_email: str | None, subject: str, html_content: str) -> bool:
     if not to_email:
         logger.warning("email skipped (%s): no recipient address", subject)
         return False
-    if not email_enabled():
+
+    api_key, sender_email, sender_name = get_brevo_config()
+    if not api_key:
         logger.info(
             "email skipped (BREVO_API_KEY not configured): to=%s subject=%s",
             to_email, subject,
@@ -181,7 +234,7 @@ def _send_email(to_email: str | None, subject: str, html_content: str) -> bool:
         return False
 
     payload = {
-        "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
+        "sender": {"name": sender_name, "email": sender_email},
         "to": [{"email": to_email}],
         "subject": subject,
         "htmlContent": html_content,
@@ -191,7 +244,7 @@ def _send_email(to_email: str | None, subject: str, html_content: str) -> bool:
             response = client.post(
                 BREVO_API_URL,
                 headers={
-                    "api-key": BREVO_API_KEY,
+                    "api-key": api_key,
                     "Content-Type": "application/json",
                     "accept": "application/json",
                 },

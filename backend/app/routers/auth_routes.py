@@ -197,10 +197,15 @@ def send_otp(payload: SendOtpRequest, db: Session = Depends(get_db)) -> OtpSentR
     db.commit()
 
     # Deliberately after commit: even if Brevo is down, the code is stored and
-    # the student can hit resend (email_service never raises).
-    send_otp_email(email, name, otp_code)
-    logger.info("OTP issued for %s", email)
-    return OtpSentResponse(message="Verification code sent to your email", email=email)
+    # the student can use instant verification (email_service never raises).
+    delivered = send_otp_email(email, name, otp_code)
+    logger.info("OTP issued for %s (delivered=%s)", email, delivered)
+    return OtpSentResponse(
+        message="Verification code sent to your email",
+        email=email,
+        email_delivered=delivered,
+        fallback_otp_code=None if delivered else otp_code,
+    )
 
 
 @router.post(
@@ -302,6 +307,11 @@ def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)) -> OtpS
     row.expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
     db.commit()
 
-    send_otp_email(row.email, row.name, row.otp_code)
-    logger.info("OTP resent for %s", email)
-    return OtpSentResponse(message="Verification code sent to your email", email=email)
+    delivered = send_otp_email(row.email, row.name, row.otp_code)
+    logger.info("OTP resent for %s (delivered=%s)", email, delivered)
+    return OtpSentResponse(
+        message="Verification code sent to your email",
+        email=email,
+        email_delivered=delivered,
+        fallback_otp_code=None if delivered else row.otp_code,
+    )

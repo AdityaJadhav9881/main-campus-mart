@@ -146,11 +146,11 @@ class _AuthScreenState extends State<AuthScreen> {
         _startResendCooldown();
         messenger.showSnackBar(
           SnackBar(
-            backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
+            backgroundColor: AppColors.royalBlue,
             content: Text(
               'Verification code sent to ${_emailController.text.trim()}',
               style: const TextStyle(
-                color: Colors.black,
+                color: Colors.white,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -204,12 +204,12 @@ class _AuthScreenState extends State<AuthScreen> {
     if (ok) {
       _startResendCooldown();
       messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
-          content: const Text(
+        const SnackBar(
+          backgroundColor: AppColors.royalBlue,
+          content: Text(
             'New verification code sent — check your inbox.',
             style: TextStyle(
-              color: Colors.black,
+              color: Colors.white,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -509,6 +509,73 @@ class _AuthScreenState extends State<AuthScreen> {
             height: 1.4,
           ),
         ),
+        Builder(
+          builder: (context) {
+            final fallback = context.watch<AuthProvider>().fallbackOtp;
+            if (fallback == null || fallback.isEmpty) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(top: 14),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  _otpController.text = fallback;
+                  setState(() {});
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Instant verification code applied!'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF3C7),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFF59E0B)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.flash_on, color: Color(0xFFB45309), size: 22),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: RichText(
+                          text: TextSpan(
+                            style: const TextStyle(
+                              color: Color(0xFF92400E),
+                              fontSize: 12.5,
+                              height: 1.35,
+                            ),
+                            children: [
+                              const TextSpan(
+                                text: 'Email delivery delayed — use instant verification code: ',
+                              ),
+                              TextSpan(
+                                text: fallback,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                  letterSpacing: 2,
+                                ),
+                              ),
+                              const TextSpan(
+                                text: '\n(Tap here to fill code)',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: Color(0xFFB45309),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
         const SizedBox(height: 18),
         Form(
           key: _otpFormKey,
@@ -544,7 +611,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   child: const Text(
                     'Resend code',
                     style: TextStyle(
-                      color: AppColors.cyanAccent,
+                      color: AppColors.royalBlue,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -746,7 +813,7 @@ class _TextFormField extends StatelessWidget {
         labelText: label,
         counterText: maxLength != null ? '' : null,
         labelStyle: const TextStyle(color: AppColors.textMuted),
-        prefixIcon: Icon(icon, size: 20, color: AppColors.cyanAccent),
+        prefixIcon: Icon(icon, size: 20, color: AppColors.royalBlue),
         suffixIcon: suffixIcon,
         filled: true,
         fillColor: AppColors.surface,
@@ -765,7 +832,7 @@ class _TextFormField extends StatelessWidget {
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(
-            color: AppColors.cyanAccent,
+            color: AppColors.royalBlue,
             width: 1.4,
           ),
         ),

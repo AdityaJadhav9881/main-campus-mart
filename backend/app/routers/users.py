@@ -48,17 +48,17 @@ def create_user(
     existing = (
         db.query(User).filter(User.firebase_uid == firebase_uid).first()
     )
+    email = (token.get("email") or payload.email).strip().lower()
+    if existing is None and email:
+        existing = db.query(User).filter(User.email.ilike(email)).first()
+        if existing:
+            existing.firebase_uid = firebase_uid
+            db.commit()
+            db.refresh(existing)
+
     if existing:
-        # Profile already present (client retry / re-install). Deliberately do
-        # NOT overwrite: trust_score and curated profile data must survive
-        # re-registration.
         response.status_code = status.HTTP_200_OK
         return existing
-
-    # Prefer the email claim from the VERIFIED token (Firebase owns identity);
-    # fall back to the request body for providers that omit `email`
-    # (e.g. phone or anonymous auth).
-    email = token.get("email") or payload.email
 
     user = User(firebase_uid=firebase_uid, name=payload.name, email=email)
     db.add(user)

@@ -34,7 +34,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from ..ai import vision_master
-from ..auth import extract_uid, verify_firebase_token
+from ..auth import extract_uid, get_or_create_current_user, verify_firebase_token
 from ..database import get_db
 from ..models import ChatMessage, Product, User
 from ..schemas import (
@@ -59,18 +59,8 @@ CATALOG_CONTEXT_LIMIT = 40
 
 
 def _current_user(db: Session, token: dict) -> User:
-    """Resolve the caller's profile row (chat endpoints require one)."""
-    user = (
-        db.query(User)
-        .filter(User.firebase_uid == extract_uid(token))
-        .first()
-    )
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Create your profile first (POST /users/) before chatting.",
-        )
-    return user
+    """Resolve the caller's profile row (auto-provisions if missing)."""
+    return get_or_create_current_user(db, token)
 
 
 def _serialize(message: ChatMessage) -> ChatMessageRead:
@@ -323,12 +313,47 @@ def _local_catalog_reply(
     message: str,
     products: list[Product],
 ) -> tuple[str, list[UUID]]:
-    """Deterministic keyword assistant used when no LLM key is configured."""
+    """Smart campus marketplace assistant engine for live active products."""
+    msg_lower = (message or "").strip().lower()
     tokens = [
         token
-        for token in (message or "").lower().split()
-        if len(token) > 2 and token not in {"the", "and", "for", "with", "want"}
+        for token in msg_lower.split()
+        if len(token) > 2 and token not in {"the", "and", "for", "with", "want", "show", "tell", "give", "please"}
     ]
+
+    is_deal_query = any(
+        w in msg_lower
+        for w in [
+            "deal", "deals", "best", "cheap", "offer", "discount", "save", "saving", "top", "recommend", "pick"
+        ]
+    )
+
+    if is_deal_query and products:
+        def _deal_score(p: Product) -> float:
+            if p.suggested_price and p.suggested_price > p.listed_price:
+                return (p.suggested_price - p.listed_price) / p.suggested_price
+            return 0.0
+
+        deals = sorted(
+            products,
+            key=lambda p: (-_deal_score(p), -(p.seller_trust_score or 4.0), p.listed_price),
+        )
+        top = deals[:5]
+        lines = ["Here are the best verified deals currently live on Campus Mart Ai (prices in ₹):"]
+        for rank, product in enumerate(top, start=1):
+            savings_note = ""
+            if product.suggested_price and product.listed_price < product.suggested_price:
+                pct = int(((product.suggested_price - product.listed_price) / product.suggested_price) * 100)
+                diff = int(product.suggested_price - product.listed_price)
+                savings_note = f" (🔥 Save ₹{diff} • {pct}% below AI value)"
+            lines.append(
+                f"{rank}. {product.title} — ₹{product.listed_price:,.0f}{savings_note} "
+                f"[{product.condition}, {product.category}]"
+            )
+        lines.append(
+            "Open Discover to view verified photos, inspection reports, or to Chat with the seller directly!"
+        )
+        return "\n\n".join(lines), [product.id for product in top]
 
     scored: list[tuple[int, Product]] = []
     for product in products:
@@ -349,33 +374,44 @@ def _local_catalog_reply(
     scored.sort(key=lambda pair: (-pair[0], pair[1].listed_price))
 
     if not scored:
+        if products:
+            top_default = sorted(
+                products,
+                key=lambda p: (-(p.seller_trust_score or 4.0), p.listed_price),
+            )[:4]
+            lines = [
+                "Here are some top-rated active listings on campus (prices in ₹):",
+            ]
+            for rank, product in enumerate(top_default, start=1):
+                lines.append(
+                    f"{rank}. {product.title} — ₹{product.listed_price:,.0f} "
+                    f"({product.condition}, {product.category})"
+                )
+            lines.append(
+                "Feel free to ask about specific gear (e.g., 'calculator', 'electronics', 'books') or ask for price advice in ₹!"
+            )
+            return "\n\n".join(lines), [product.id for product in top_default]
         return (
-            "I couldn't find a matching item in the live catalogue right now. "
-            "Try different keywords (e.g. 'bluetooth speaker', 'textbook', "
-            "'calculator'), or open Discover to browse every listing. "
-            "Tip: I can also check whether a second-hand price is fair - just "
-            "tell me the item and the asking price in ₹.",
+            "No active listings found on campus yet. Try asking again soon, or list your own gear on the Sell tab!",
             [],
         )
 
-    top = scored[:5]
+    top = [p for _, p in scored[:5]]
     lines = [f"{_CATALOG_FALLBACK_INTRO} (prices in ₹):"]
-    for rank, (score, product) in enumerate(top, start=1):
+    for rank, product in enumerate(top, start=1):
         deal = (
-            " - great deal vs AI fair value"
-            if product.suggested_price
-            and product.listed_price < product.suggested_price
+            f" — 🔥 Great deal (AI fair value: ₹{product.suggested_price:,.0f})"
+            if product.suggested_price and product.listed_price < product.suggested_price
             else ""
         )
         lines.append(
-            f"{rank}. {product.title} - ₹{product.listed_price:,.0f} "
+            f"{rank}. {product.title} — ₹{product.listed_price:,.0f} "
             f"({product.condition}, {product.category}){deal}"
         )
     lines.append(
-        "Open Discover and search for the exact title to see photos, the AI "
-        "inspection report, and to Chat with the seller."
+        "Open Discover to view verified photos, check AI reports, and Chat with the seller!"
     )
-    return "\n".join(lines), [product.id for _, product in top]
+    return "\n\n".join(lines), [product.id for product in top]
 
 
 def _recommended_ids(reply: str, products: list[Product]) -> list[UUID]:

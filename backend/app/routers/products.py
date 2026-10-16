@@ -41,7 +41,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..ai import vision_master
 from ..ai.orchestrator import ai_orchestrator
-from ..auth import account_terminated, extract_uid, verify_firebase_token
+from ..auth import (
+    account_terminated,
+    extract_uid,
+    get_or_create_current_user,
+    verify_firebase_token,
+)
 from ..database import get_db
 from ..email_service import send_listing_published_email
 from ..models import Product, User
@@ -155,21 +160,8 @@ def create_product(
            background task - non-blocking, a mail hiccup cannot fail the
            listing.
     """
-    firebase_uid = extract_uid(token)
-
-    # The seller must already have a profile -> FK (seller_id -> users.id).
-    seller = (
-        db.query(User).filter(User.firebase_uid == firebase_uid).first()
-    )
-    if seller is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Create your profile first (POST /users/) before listing products.",
-        )
-
-    # Phase 7: blocked students cannot create listings (moderation ban).
-    if seller.status == "blocked":
-        raise account_terminated()
+    # The seller must already have a profile -> auto-provision if needed.
+    seller = get_or_create_current_user(db, token)
 
     # -------------------------------------------------------------------------
     # Phase 3: LangGraph AI pipeline - runs BEFORE any DB write
@@ -407,15 +399,7 @@ def delete_own_listing(
     their own posts is normal marketplace behaviour (the -0.8 penalty stays
     reserved for admin moderation deletes).
     """
-    firebase_uid = extract_uid(token)
-    user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Create your profile first (POST /users/) before listing products.",
-        )
-    if user.status == "blocked":
-        raise account_terminated()
+    user = get_or_create_current_user(db, token)
 
     product = (
         db.query(Product)

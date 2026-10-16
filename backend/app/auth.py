@@ -25,6 +25,7 @@ NOTE: The `tokenUrl="token"` value below only feeds the Swagger/OpenAPI docs.
 
 import logging
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -405,3 +406,52 @@ def extract_uid(decoded_token: dict) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return uid
+
+
+def get_or_create_current_user(db: Session, token_claims: dict) -> User:
+    """Resolve or auto-provision the caller's profile row from token claims.
+
+    Guarantees that ANY authenticated endpoint (Ask AI, chat, purchase,
+    create-listing, profile) seamlessly resolves or creates the active user.
+    """
+    uid = str(token_claims.get("uid") or token_claims.get("user_id") or "").strip()
+    email = str(token_claims.get("email") or "").strip().lower()
+    name = str(token_claims.get("name") or "").strip()
+
+    user: User | None = None
+    if uid:
+        user = db.query(User).filter(User.firebase_uid == uid).first()
+
+    if user is None and email:
+        user = db.query(User).filter(User.email.ilike(email)).first()
+        if user is not None and uid and user.firebase_uid != uid:
+            user.firebase_uid = uid
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+    if user is None:
+        if not uid and not email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token is missing user credentials",
+            )
+        resolved_email = email or f"{uid}@campus.internal"
+        resolved_name = name or (resolved_email.split("@")[0].capitalize())
+        user = User(
+            id=uuid.uuid4(),
+            firebase_uid=uid or str(uuid.uuid4()),
+            email=resolved_email,
+            name=resolved_name,
+            trust_score=5.0,
+            status="active",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info("Auto-provisioned User on the fly: %s (%s)", user.email, user.id)
+
+    if user.status == "blocked":
+        raise account_terminated()
+
+    return user

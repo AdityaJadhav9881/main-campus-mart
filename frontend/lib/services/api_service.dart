@@ -529,7 +529,7 @@ class ApiService {
 
   /// POST /auth/send-otp - step 1: park the signup + email a 6-digit code.
   /// Throws 409 when the address already has an account.
-  Future<void> sendOtp({
+  Future<Map<String, dynamic>> sendOtp({
     required String name,
     required String email,
     required String password,
@@ -543,6 +543,7 @@ class ApiService {
       },
     );
     if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
   }
 
   /// POST /auth/verify-otp - step 2: validate the code, create the active
@@ -560,12 +561,13 @@ class ApiService {
   }
 
   /// POST /auth/resend-otp - fresh code for a signup still on step 2.
-  Future<void> resendOtp({required String email}) async {
+  Future<Map<String, dynamic>> resendOtp({required String email}) async {
     final response = await _post(
       '/auth/resend-otp',
       body: <String, dynamic>{'email': email.trim()},
     );
     if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
   }
 
   // ---------------------------------------------------------------------------

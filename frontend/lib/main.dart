@@ -104,10 +104,10 @@ class _AuthGateState extends State<_AuthGate> {
           return _bootWarmupVisible
               ? const _BootWarmupCard()
               : const Scaffold(
-                  backgroundColor: AppColors.voidBlack,
+                  backgroundColor: AppColors.background,
                   body: Center(
                     child:
-                        CircularProgressIndicator(color: AppColors.cyanAccent),
+                        CircularProgressIndicator(color: AppColors.royalBlue),
                   ),
                 );
         }

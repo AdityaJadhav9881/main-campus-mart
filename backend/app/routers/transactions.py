@@ -16,7 +16,12 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
-from ..auth import account_terminated, extract_uid, verify_firebase_token
+from ..auth import (
+    account_terminated,
+    extract_uid,
+    get_or_create_current_user,
+    verify_firebase_token,
+)
 from ..database import get_db
 from ..email_service import send_product_sold_emails
 from ..models import Product, Transaction, User
@@ -32,14 +37,8 @@ router = APIRouter(tags=["transactions"])
 SELL_TRUST_BONUS = 0.1
 
 
-def _load_user(db: Session, firebase_uid: str) -> User:
-    user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Create your profile first (POST /users/) before purchasing.",
-        )
-    return user
+def _load_user(db: Session, token: dict) -> User:
+    return get_or_create_current_user(db, token)
 
 
 @router.post(
@@ -65,7 +64,7 @@ def purchase_product(
         6. Queue BOTH Brevo sale emails (seller "Sold!" + buyer "Order
            Confirmed") as a background task - non-blocking by design.
     """
-    buyer = _load_user(db, extract_uid(token))
+    buyer = _load_user(db, token)
 
     if buyer.status == "blocked":
         raise account_terminated()
@@ -155,7 +154,7 @@ def my_transactions(
     db: Session = Depends(get_db),
 ) -> MyTransactionsResponse:
     """Return the logged-in student's purchase + sale history, newest first."""
-    user = _load_user(db, extract_uid(token))
+    user = _load_user(db, token)
 
     bought_rows = (
         db.query(Transaction)

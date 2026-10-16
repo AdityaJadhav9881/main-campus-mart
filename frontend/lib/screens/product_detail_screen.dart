@@ -105,7 +105,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     final saved = wishlist.contains(product.id);
 
     return Scaffold(
-      backgroundColor: AppColors.voidBlack,
+      backgroundColor: AppColors.background,
       // Pinned action bar: price on the left, Buy / Reserve Now on the right.
       bottomNavigationBar: _BottomBuyBar(
         product: product,
@@ -114,13 +114,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         isOwnListing: _isOwnListing,
         canBuy: _canBuy,
         onBuy: _purchase,
+        onChat: _openChatWithSeller,
       ),
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
             expandedHeight: 320,
             pinned: true,
-            backgroundColor: AppColors.voidBlack,
+            backgroundColor: AppColors.background,
             surfaceTintColor: Colors.transparent,
             // Glass badges stay legible over bright photos AND dark ones.
             leading: _GlassCircleButton(
@@ -314,7 +315,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       ? '?'
                       : displayName.trim()[0].toUpperCase(),
                   style: const TextStyle(
-                    color: AppColors.cyanAccent,
+                    color: AppColors.royalBlue,
                     fontSize: 18,
                     fontWeight: FontWeight.w800,
                   ),
@@ -343,7 +344,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
               Text(
                 '${trustScore.toStringAsFixed(1)} / 5.0',
                 style: const TextStyle(
-                  color: AppColors.cyanAccent,
+                  color: AppColors.inkBlack,
                   fontSize: 15,
                   fontWeight: FontWeight.w800,
                 ),
@@ -362,14 +363,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                 onPressed: _openChatWithSeller,
                 icon: const Icon(Icons.chat_bubble_outline, size: 17),
                 label: const Text(
-                  'Chat with Seller',
+                  'Message Seller',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.cyanAccent,
+                  foregroundColor: AppColors.royalBlue,
                   side: BorderSide(
-                    color: AppColors.cyanAccent.withOpacity(0.55),
+                    color: AppColors.royalBlue.withOpacity(0.55),
                     width: 1.2,
                   ),
                   minimumSize: const Size.fromHeight(46),
@@ -455,14 +456,14 @@ class _AiInspectionReport extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.30)),
+        border: Border.all(color: AppColors.royalBlue.withOpacity(0.25)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Row(
             children: [
-              Icon(Icons.auto_awesome, size: 15, color: AppColors.cyanAccent),
+              Icon(Icons.auto_awesome, size: 15, color: AppColors.royalBlue),
               SizedBox(width: 7),
               Expanded(
                 child: Text(
@@ -481,7 +482,7 @@ class _AiInspectionReport extends StatelessWidget {
           // 1. Listing Intelligence Agent -------------------------------------
           _ReportRow(
             icon: Icons.category_outlined,
-            color: AppColors.cyanAccent,
+            color: AppColors.royalBlue,
             agent: 'Listing Intelligence Agent',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -503,14 +504,14 @@ class _AiInspectionReport extends StatelessWidget {
                       const Icon(
                         Icons.photo_camera_outlined,
                         size: 13,
-                        color: AppColors.cyanAccent,
+                        color: AppColors.royalBlue,
                       ),
                       const SizedBox(width: 5),
                       Expanded(
                         child: Text(
                           product.aiConditionNotes!.trim(),
                           style: const TextStyle(
-                            color: AppColors.cyanAccent,
+                            color: AppColors.royalBlue,
                             fontSize: 12,
                             height: 1.4,
                           ),
@@ -693,7 +694,7 @@ class _PriceComparison extends StatelessWidget {
           label: 'Listed',
           value: listed,
           max: maxPrice,
-          color: AppColors.cyanAccent,
+          color: AppColors.royalBlue,
         ),
         const SizedBox(height: 6),
         _PriceBar(
@@ -792,7 +793,7 @@ class _SimilarListingsSection extends StatelessWidget {
       children: [
         const Row(
           children: [
-            Icon(Icons.grid_view_outlined, size: 15, color: AppColors.cyanAccent),
+            Icon(Icons.grid_view_outlined, size: 15, color: AppColors.royalBlue),
             SizedBox(width: 7),
             Text(
               'Similar Campus Listings',
@@ -868,7 +869,7 @@ class _SimilarListingsSection extends StatelessWidget {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
-                                        color: AppColors.cyanAccent,
+                                        color: AppColors.inkBlack,
                                         fontSize: 13,
                                         fontWeight: FontWeight.w800,
                                       ),
@@ -877,7 +878,7 @@ class _SimilarListingsSection extends StatelessWidget {
                                   const Icon(
                                     Icons.shield_outlined,
                                     size: 11,
-                                    color: AppColors.cyanAccent,
+                                    color: AppColors.royalBlue,
                                   ),
                                   const SizedBox(width: 2),
                                   Text(
@@ -916,6 +917,7 @@ class _BottomBuyBar extends StatelessWidget {
     required this.isOwnListing,
     required this.canBuy,
     required this.onBuy,
+    this.onChat,
   });
 
   final Product product;
@@ -924,6 +926,7 @@ class _BottomBuyBar extends StatelessWidget {
   final bool isOwnListing;
   final bool canBuy;
   final VoidCallback onBuy;
+  final VoidCallback? onChat;
 
   String get _label {
     if (isPurchasing) return 'Processing...';
@@ -937,6 +940,7 @@ class _BottomBuyBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final bottom = MediaQuery.paddingOf(context).bottom;
     final sold = status == 'sold';
+    final showChat = !isOwnListing && status == 'active' && onChat != null;
 
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottom),
@@ -966,34 +970,68 @@ class _BottomBuyBar extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: sold ? AppColors.textMuted : AppColors.cyanAccent,
-                    fontSize: 21,
+                    color: sold ? AppColors.textMuted : AppColors.inkBlack,
+                    fontSize: 20,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 190,
-            child: FilledButton(
-              onPressed: canBuy ? onBuy : null,
-              child: isPurchasing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.2,
-                        color: Colors.black,
-                      ),
-                    )
-                  : Text(
-                      _label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+          if (showChat) ...[
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: onChat,
+              icon: const Icon(Icons.chat_bubble_outline, size: 16),
+              label: const Text('Chat'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.royalBlue,
+                side: BorderSide(
+                  color: AppColors.royalBlue.withOpacity(0.5),
+                  width: 1.2,
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(0, 46),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
             ),
+          ],
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: canBuy ? onBuy : null,
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.inkBlack,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              minimumSize: Size(showChat ? 130 : 170, 46),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              textStyle: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+            ),
+            child: isPurchasing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Text(
+                    _label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
           ),
         ],
       ),
@@ -1041,19 +1079,19 @@ class _VerifiedBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: AppColors.cyanAccent.withOpacity(0.12),
+        color: AppColors.forestGreen.withOpacity(0.12),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.5)),
+        border: Border.all(color: AppColors.forestGreen.withOpacity(0.4)),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.verified, size: 12, color: AppColors.cyanAccent),
+          Icon(Icons.verified, size: 12, color: AppColors.forestGreen),
           SizedBox(width: 4),
           Text(
             'Verified Student',
             style: TextStyle(
-              color: AppColors.cyanAccent,
+              color: AppColors.forestGreen,
               fontSize: 10,
               fontWeight: FontWeight.w700,
             ),
@@ -1064,7 +1102,7 @@ class _VerifiedBadge extends StatelessWidget {
   }
 }
 
-/// Cyan outlined tag showing the AI-assigned marketplace category.
+/// Outlined tag showing the AI-assigned marketplace category.
 class _CategoryTag extends StatelessWidget {
   const _CategoryTag({required this.label});
 
@@ -1075,14 +1113,14 @@ class _CategoryTag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: AppColors.cyanAccent.withOpacity(0.1),
+        color: AppColors.royalBlue.withOpacity(0.08),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.45)),
+        border: Border.all(color: AppColors.royalBlue.withOpacity(0.35)),
       ),
       child: Text(
         label.toUpperCase(),
         style: const TextStyle(
-          color: AppColors.cyanAccent,
+          color: AppColors.royalBlue,
           fontSize: 10.5,
           fontWeight: FontWeight.w800,
           letterSpacing: 0.8,
@@ -1216,7 +1254,7 @@ class _HeroGalleryState extends State<_HeroGallery> {
                     height: 6,
                     decoration: BoxDecoration(
                       color: index == _page
-                          ? AppColors.cyanAccent
+                          ? AppColors.royalBlue
                           : Colors.white54,
                       borderRadius: BorderRadius.circular(999),
                     ),
@@ -1244,7 +1282,7 @@ class _AiTagsBlock extends StatelessWidget {
       children: [
         const Row(
           children: [
-            Icon(Icons.tag, size: 14, color: AppColors.cyanAccent),
+            Icon(Icons.tag, size: 14, color: AppColors.royalBlue),
             SizedBox(width: 6),
             Text(
               'AI Search Tags',

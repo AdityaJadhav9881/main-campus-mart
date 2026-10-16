@@ -212,6 +212,16 @@ class _CategoryChip extends StatelessWidget {
 
   final String label;
 
+  static String _shorten(String raw) {
+    final lower = raw.trim().toLowerCase();
+    if (lower.contains('academic')) return 'ACADEMIC';
+    if (lower.contains('lab gear') || lower.contains('instrument')) return 'LAB GEAR';
+    if (lower.contains('hostel') || lower.contains('lifestyle')) return 'HOSTEL';
+    if (lower.contains('electronic')) return 'ELECTRONICS';
+    if (lower.contains('book')) return 'BOOKS';
+    return raw.toUpperCase();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -222,7 +232,7 @@ class _CategoryChip extends StatelessWidget {
         border: Border.all(color: AppColors.royalBlue.withOpacity(0.25)),
       ),
       child: Text(
-        label.toUpperCase(),
+        _shorten(label),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
@@ -297,7 +307,7 @@ class _TrustPill extends StatelessWidget {
         Icon(
           Icons.shield_outlined,
           size: 13,
-          color: hasScore ? AppColors.cyanAccent : AppColors.textMuted,
+          color: hasScore ? AppColors.royalBlue : AppColors.textMuted,
         ),
         const SizedBox(width: 3),
         Text(

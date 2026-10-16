@@ -287,6 +287,8 @@ class OtpSentResponse(BaseModel):
 
     message: str = "Verification code sent to your email"
     email: str
+    email_delivered: bool = True
+    fallback_otp_code: str | None = None
 
 
 # =============================================================================

@@ -27,6 +27,7 @@ class AuthProvider extends ChangeNotifier {
   bool _isLoading = false;
   bool _isRestoring = true;
   String? _errorMessage;
+  String? _fallbackOtp;
   String _token = '';
 
   UserProfile? get profile => _profile;
@@ -34,6 +35,12 @@ class AuthProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get isRestoring => _isRestoring;
   String? get errorMessage => _errorMessage;
+  String? get fallbackOtp => _fallbackOtp;
+
+  void clearFallbackOtp() {
+    _fallbackOtp = null;
+    notifyListeners();
+  }
 
   /// Bearer token used for every authenticated call (JWT or Firebase).
   String get token => _token;
@@ -153,9 +160,11 @@ class AuthProvider extends ChangeNotifier {
   }) async {
     _isLoading = true;
     _errorMessage = null;
+    _fallbackOtp = null;
     notifyListeners();
     try {
-      await _api.sendOtp(name: name, email: email, password: password);
+      final res = await _api.sendOtp(name: name, email: email, password: password);
+      _fallbackOtp = res['fallback_otp_code'] as String?;
       return true;
     } on ApiException catch (error) {
       _errorMessage = error.message;
@@ -179,6 +188,7 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
     try {
       final session = await _api.verifyOtp(email: email, otpCode: otpCode);
+      _fallbackOtp = null;
       await _adoptSession(session);
       return true;
     } on ApiException catch (error) {
@@ -197,7 +207,8 @@ class AuthProvider extends ChangeNotifier {
   Future<bool> resendOtp({required String email}) async {
     _errorMessage = null;
     try {
-      await _api.resendOtp(email: email);
+      final res = await _api.resendOtp(email: email);
+      _fallbackOtp = res['fallback_otp_code'] as String?;
       notifyListeners();
       return true;
     } on ApiException catch (error) {

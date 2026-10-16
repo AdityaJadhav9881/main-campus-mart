@@ -255,7 +255,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ],
       ),
       body: RefreshIndicator(
-        color: AppColors.cyanAccent,
+        color: AppColors.royalBlue,
         backgroundColor: AppColors.surface,
         onRefresh: () async {
           await auth.refreshProfile();
@@ -264,13 +264,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 36),
           children: [
             if (auth.isLoading && profile == null) ...[
               const SizedBox(height: 120),
               const Center(
                 child: CircularProgressIndicator(
-                  color: AppColors.cyanAccent,
+                  color: AppColors.royalBlue,
                 ),
               ),
             ] else if (profile == null) ...[
@@ -381,7 +381,7 @@ class _ProfileHeader extends StatelessWidget {
             child: Text(
               name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase(),
               style: TextStyle(
-                color: isBlocked ? AppColors.danger : AppColors.cyanAccent,
+                color: isBlocked ? AppColors.danger : AppColors.royalBlue,
                 fontSize: 24,
                 fontWeight: FontWeight.w800,
               ),
@@ -419,13 +419,13 @@ class _ProfileHeader extends StatelessWidget {
                     vertical: 3,
                   ),
                   decoration: BoxDecoration(
-                    color: (isBlocked ? AppColors.danger : AppColors.cyanAccent)
+                    color: (isBlocked ? AppColors.danger : AppColors.royalBlue)
                         .withOpacity(0.12),
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(
                       color: (isBlocked
                               ? AppColors.danger
-                              : AppColors.cyanAccent)
+                              : AppColors.royalBlue)
                           .withOpacity(0.5),
                     ),
                   ),
@@ -436,7 +436,7 @@ class _ProfileHeader extends StatelessWidget {
                         isBlocked ? Icons.block : Icons.school_outlined,
                         size: 12,
                         color:
-                            isBlocked ? AppColors.danger : AppColors.cyanAccent,
+                            isBlocked ? AppColors.danger : AppColors.royalBlue,
                       ),
                       const SizedBox(width: 4),
                       Text(
@@ -444,7 +444,7 @@ class _ProfileHeader extends StatelessWidget {
                         style: TextStyle(
                           color: isBlocked
                               ? AppColors.danger
-                              : AppColors.cyanAccent,
+                              : AppColors.royalBlue,
                           fontSize: 10,
                           fontWeight: FontWeight.w700,
                         ),
@@ -634,9 +634,9 @@ class _ActivitySection extends StatelessWidget {
             const Material(
               color: Colors.transparent,
               child: TabBar(
-                labelColor: AppColors.cyanAccent,
+                labelColor: AppColors.royalBlue,
                 unselectedLabelColor: AppColors.textMuted,
-                indicatorColor: AppColors.cyanAccent,
+                indicatorColor: AppColors.royalBlue,
                 indicatorWeight: 2.5,
                 labelStyle: TextStyle(
                   fontSize: 12.5,
@@ -683,7 +683,7 @@ class _ActivitySection extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 42),
                 child: CircularProgressIndicator(
-                  color: AppColors.cyanAccent,
+                  color: AppColors.royalBlue,
                 ),
               )
             else if (historyError != null && !hasAnyActivity)
@@ -706,7 +706,7 @@ class _ActivitySection extends StatelessWidget {
                       child: const Text(
                         'Retry',
                         style: TextStyle(
-                          color: AppColors.cyanAccent,
+                          color: AppColors.royalBlue,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -1072,7 +1072,7 @@ class _SavedTab extends StatelessWidget {
                       Text(
                         formatInr(product.listedPrice),
                         style: const TextStyle(
-                          color: AppColors.cyanAccent,
+                          color: AppColors.inkBlack,
                           fontSize: 13,
                           fontWeight: FontWeight.w800,
                         ),

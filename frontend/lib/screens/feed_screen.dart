@@ -205,14 +205,14 @@ class _FeedScreenState extends State<FeedScreen> {
                     option.icon,
                     size: 19,
                     color: option.id == _sort
-                        ? AppColors.cyanAccent
+                        ? AppColors.royalBlue
                         : AppColors.textMuted,
                   ),
                   title: Text(
                     option.label,
                     style: TextStyle(
                       color: option.id == _sort
-                          ? AppColors.cyanAccent
+                          ? AppColors.royalBlue
                           : AppColors.textPrimary,
                       fontSize: 14.5,
                       fontWeight: option.id == _sort
@@ -221,7 +221,7 @@ class _FeedScreenState extends State<FeedScreen> {
                     ),
                   ),
                   trailing: option.id == _sort
-                      ? const Icon(Icons.check, size: 18, color: AppColors.cyanAccent)
+                      ? const Icon(Icons.check, size: 18, color: AppColors.royalBlue)
                       : null,
                   onTap: () => Navigator.of(sheetContext).pop(option.id),
                 ),
@@ -340,13 +340,13 @@ class _FeedScreenState extends State<FeedScreen> {
     final sortLabel =
         _sortOptions.firstWhere((option) => option.id == _sort).label;
     return SizedBox(
-      height: 56,
+      height: 54,
       child: Row(
         children: [
           Expanded(
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+              padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
               itemCount: categories.length,
               separatorBuilder: (context, index) => const SizedBox(width: 8),
               itemBuilder: (context, index) {
@@ -359,20 +359,20 @@ class _FeedScreenState extends State<FeedScreen> {
                   visualDensity: VisualDensity.compact,
                   onSelected: (_) {
                     setState(() => _category = category);
-                    // Chips also re-query the server so `?category=` SQL
-                    // filtering backs the local pass.
                     context
                         .read<ProductProvider>()
                         .loadProducts(category: category == 'All' ? '' : category);
                   },
-                  selectedColor: AppColors.cyanAccent,
+                  selectedColor: AppColors.inkBlack,
                   backgroundColor: AppColors.surface,
-                  side: const BorderSide(color: AppColors.hairline),
+                  side: BorderSide(
+                    color: selected ? AppColors.inkBlack : AppColors.hairline,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(999),
                   ),
                   labelStyle: TextStyle(
-                    color: selected ? Colors.black : AppColors.textMuted,
+                    color: selected ? Colors.white : AppColors.textPrimary,
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   ),
@@ -380,39 +380,49 @@ class _FeedScreenState extends State<FeedScreen> {
               },
             ),
           ),
+          Container(
+            width: 1,
+            height: 24,
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            color: AppColors.hairline,
+          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 12, 16, 4),
+            padding: const EdgeInsets.fromLTRB(4, 8, 16, 8),
             child: Tooltip(
               message: 'Sorted by: $sortLabel',
               child: InkWell(
                 borderRadius: BorderRadius.circular(999),
                 onTap: _openSortSheet,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                   decoration: BoxDecoration(
                     color: _sort == 'newest'
                         ? AppColors.surface
-                        : AppColors.cyanAccent.withOpacity(0.12),
+                        : AppColors.royalBlue.withOpacity(0.08),
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(
                       color: _sort == 'newest'
                           ? AppColors.hairline
-                          : AppColors.cyanAccent.withOpacity(0.5),
+                          : AppColors.royalBlue.withOpacity(0.4),
                     ),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.sort,
-                        size: 15,
-                        color: AppColors.cyanAccent,
+                        size: 16,
+                        color: _sort == 'newest'
+                            ? AppColors.textPrimary
+                            : AppColors.royalBlue,
                       ),
                       const SizedBox(width: 5),
                       Text(
                         _sort == 'newest' ? 'Sort' : 'Sorted',
-                        style: const TextStyle(
-                          color: AppColors.cyanAccent,
+                        style: TextStyle(
+                          color: _sort == 'newest'
+                              ? AppColors.textPrimary
+                              : AppColors.royalBlue,
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
                         ),
@@ -442,7 +452,7 @@ class _FeedScreenState extends State<FeedScreen> {
       return _warmupVisible
           ? const _WakeUpCard()
           : const Center(
-              child: CircularProgressIndicator(color: AppColors.cyanAccent),
+              child: CircularProgressIndicator(color: AppColors.royalBlue),
             );
     }
     if (showError) {
@@ -459,7 +469,7 @@ class _FeedScreenState extends State<FeedScreen> {
     final filtersActive = _category != 'All' || _query.isNotEmpty;
 
     return RefreshIndicator(
-      color: AppColors.cyanAccent,
+      color: AppColors.royalBlue,
       backgroundColor: AppColors.surface,
       onRefresh: () async {
         _scheduleWarmup();
@@ -536,7 +546,7 @@ class _WakeUpCard extends StatelessWidget {
               height: 46,
               child: CircularProgressIndicator(
                 strokeWidth: 3.5,
-                color: AppColors.cyanAccent,
+                color: AppColors.royalBlue,
               ),
             ),
             SizedBox(height: 22),
@@ -589,13 +599,13 @@ class _AiRecommendationRail extends StatelessWidget {
           padding: EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: Row(
             children: [
-              Icon(Icons.auto_awesome, size: 15, color: AppColors.cyanAccent),
+              Icon(Icons.auto_awesome, size: 16, color: AppColors.royalBlue),
               SizedBox(width: 6),
               Text(
                 'AI Recommended For You',
                 style: TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 13.5,
+                  color: AppColors.inkBlack,
+                  fontSize: 14,
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -603,17 +613,16 @@ class _AiRecommendationRail extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 178,
+          height: 200,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
             itemCount: picks.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 10),
+            separatorBuilder: (context, index) => const SizedBox(width: 12),
             itemBuilder: (context, index) {
               final product = picks[index];
               return _RecommendationCard(
                 product: product,
-                reason: RecommendationEngine.reasonFor(product),
                 onTap: () => onOpen(product),
               );
             },
@@ -628,12 +637,10 @@ class _AiRecommendationRail extends StatelessWidget {
 class _RecommendationCard extends StatelessWidget {
   const _RecommendationCard({
     required this.product,
-    required this.reason,
     required this.onTap,
   });
 
   final Product product;
-  final String reason;
   final VoidCallback onTap;
 
   @override
@@ -642,13 +649,13 @@ class _RecommendationCard extends StatelessWidget {
     final below = suggested != null && suggested > 0 && product.listedPrice < suggested;
 
     return SizedBox(
-      width: 138,
+      width: 156,
       child: Material(
         color: AppColors.surface,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(
-            color: AppColors.cyanAccent.withOpacity(0.35),
+          side: const BorderSide(
+            color: AppColors.hairline,
             width: 1,
           ),
         ),
@@ -662,9 +669,6 @@ class _RecommendationCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // NOTE: no Hero here on purpose - this card can appear
-                    // alongside the grid card for the same product, and two
-                    // Heroes sharing a tag on one route is a Flutter error.
                     product.imageUrl.isEmpty
                         ? const ColoredBox(color: AppColors.surfaceHigh)
                         : Image.network(
@@ -681,7 +685,7 @@ class _RecommendationCard extends StatelessWidget {
                                           height: 18,
                                           child: CircularProgressIndicator(
                                             strokeWidth: 2,
-                                            color: AppColors.cyanAccent,
+                                            color: AppColors.royalBlue,
                                           ),
                                         ),
                                       ),
@@ -696,21 +700,22 @@ class _RecommendationCard extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 9),
+                padding: const EdgeInsets.fromLTRB(9, 8, 9, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       product.title,
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppColors.textPrimary,
                         fontSize: 12,
+                        height: 1.25,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 6),
                     Row(
                       children: [
                         Expanded(
@@ -719,39 +724,63 @@ class _RecommendationCard extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: AppColors.cyanAccent,
-                              fontSize: 13.5,
+                              color: AppColors.inkBlack,
+                              fontSize: 14.5,
                               fontWeight: FontWeight.w800,
                             ),
                           ),
                         ),
                         const Icon(
                           Icons.shield_outlined,
-                          size: 12,
-                          color: AppColors.cyanAccent,
+                          size: 13,
+                          color: AppColors.royalBlue,
                         ),
                         const SizedBox(width: 2),
                         Text(
                           (product.sellerTrustScore ?? 5.0).toStringAsFixed(1),
                           style: const TextStyle(
                             color: AppColors.textPrimary,
-                            fontSize: 10.5,
+                            fontSize: 11,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      reason,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w600,
+                    const SizedBox(height: 6),
+                    if (below)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.forestGreen.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'Save ₹${(suggested - product.listedPrice).round()}',
+                          style: const TextStyle(
+                            color: AppColors.forestGreen,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      )
+                    else
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.royalBlue.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          product.category,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.royalBlue,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -853,7 +882,7 @@ class _FeedMessage extends StatelessWidget {
                     child: Text(
                       actionLabel,
                       style: const TextStyle(
-                        color: AppColors.cyanAccent,
+                        color: AppColors.royalBlue,
                         fontWeight: FontWeight.w700,
                       ),
                     ),

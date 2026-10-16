@@ -119,10 +119,9 @@ def test_otp_signup_full_flow(client):
 
     sent = client.post("/auth/send-otp", json=payload)
     assert sent.status_code == 200, sent.text
-    assert sent.json() == {
-        "message": "Verification code sent to your email",
-        "email": "otp.student@campus.edu",
-    }
+    sent_json = sent.json()
+    assert sent_json["message"] == "Verification code sent to your email"
+    assert sent_json["email"] == "otp.student@campus.edu"
 
     # The 6-digit code + hashed password are parked for 10 minutes.
     session = TestingSessionLocal()
