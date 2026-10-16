@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from pathlib import Path
 import re
 from typing import Any
 
@@ -46,6 +47,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from ..models import SystemConfig
+from ..storage import UPLOAD_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ logger = logging.getLogger(__name__)
 PROVIDERS: tuple[str, ...] = ("gemini", "openai", "groq", "openrouter")
 
 DEFAULT_PROVIDER = "gemini"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Official default endpoints; PUT /admin/ai-config's `ai_base_url` overrides.
 PROVIDER_BASE_URLS: dict[str, str] = {
@@ -162,53 +164,103 @@ _CATEGORY_LIST = (
 )
 
 ANALYSIS_PROMPT = f"""You are the listing-intelligence engine of Campus Mart Ai, an Indian \
-college second-hand marketplace. You receive {4}+ photos of one item taken from different \
+college second-hand marketplace. You receive 4+ photos of one item taken from different \
 angles: Front, Back, Side, and a Close-up/Label shot. Study EVERY photo before answering.
 
-Identify the EXACT product (brand + model where readable), judge physical wear from all \
-angles, and price it for the INDIAN campus used-goods market.
+Carefully examine all 4 photos and perform deep catalog and brand matching. Read brand names, \
+model numbers, serial numbers, labels, engravings, and ports (e.g. recognizing "Bose SoundLink Flex", \
+"Casio fx-991EX ClassWiz", "Sony WH-1000XM4", "Logitech MX Master", "Apple MacBook Air M1", \
+"HC Verma Concepts of Physics", "SanDisk Ultra 64GB", "Arduino Uno R3", etc.). \
+Judge physical wear, scratches, scuffs, dents, and functionality indicators from all angles, and \
+calculate accurate realistic resale market prices in Indian Rupees (₹).
 
-Return ONLY one JSON object (no markdown, no commentary) with exactly these keys:
+Return ONLY one JSON object (no markdown, no commentary, no code fences) with exactly these keys:
 {{
-  "brand": string or null          - exact brand visible (e.g. "Bose", "Casio", "Pentonic")
-  "model_name": string or null     - exact model/variant (e.g. "SoundLink Flex", "fx-991EX")
-  "title": string                  - compelling marketplace title, <= 120 chars
-  "description": string            - 2-4 honest sentences: what it is, wear, accessories
+  "brand": string or null          - exact brand visible (e.g. "Bose", "Casio", "Apple", "Classmate")
+  "model_name": string or null     - exact model/variant (e.g. "SoundLink Flex", "fx-991CW", "AirPods Pro")
+  "title": string                  - compelling, accurate marketplace title with brand & model, <= 120 chars
+  "description": string            - 2-4 professional, honest sentences: exact specs, condition, included accessories
   "category": string               - exactly one of {_CATEGORY_LIST}
   "condition": string              - exactly one of "Like New", "Good", "Fair"
-  "condition_notes": string        - 4-angle inspection summary: scratches, dents,
-                                     yellowing, missing parts, label/readability, box/accessories
+  "condition_notes": string        - detailed 4-angle inspection summary: front/back/side/label wear,
+                                     scratches, dents, button/port condition, accessories/box
   "price_min_inr": number          - realistic used-price floor in Indian Rupees (₹)
   "price_max_inr": number          - realistic used-price ceiling in Indian Rupees (₹)
-  "suggested_price_inr": number    - fair-value midpoint, rounded to nearest 10
-  "listed_price_inr": number       - asking price that sells fast (5-12% under fair value)
+  "suggested_price_inr": number    - fair-market resale value in ₹ (rounded to nearest 10)
+  "listed_price_inr": number       - fast-sale asking price (5-12% under fair value, rounded to 10)
   "ai_tags": string[]              - 10-15 lowercase search keywords: brand, model,
-                                     synonyms, object type, use-case (so "music box"
-                                     or "bluetooth audio" still finds a speaker)
+                                     synonyms, category, use-cases (e.g. "bose", "soundlink flex",
+                                     "bluetooth speaker", "portable audio", "waterproof speaker", "electronics")
 }}
 
-PRICING RULES - Indian Rupees ONLY:
-  * Reference points: ballpoint pen ₹10-50, used textbook ₹250-450, scientific
-    calculator ₹300-900, headphones ₹500-3,000, used speaker (Bose SoundLink)
-    ₹4,000-7,500, used laptop ₹12,000-45,000, lab multimeter ₹400-2,500.
-  * NEVER output US dollars, NEVER emit the placeholder number 80 unless it is
-    a genuine Rupee amount, NEVER scale by 80-100 as if the base unit were USD.
-  * Condition scaling: Like New ~= 90% of midpoint, Good ~= 70%, Fair ~= 50%.
+PRICING RULES - Indian Rupees (₹) ONLY:
+  * Benchmark real Indian campus second-hand prices:
+    - High-end portable speaker (e.g. Bose SoundLink Flex, JBL Charge): ₹8,500 - ₹12,000 (new is ~₹13k-16k)
+    - Budget Bluetooth speaker (boAt, Portronics): ₹600 - ₹1,800
+    - Scientific calculator (Casio fx-991EX / CW): ₹600 - ₹1,200
+    - Standard engineering / medical textbook: ₹300 - ₹700
+    - Wireless ANC headphones (Sony, Bose, Sennheiser): ₹8,000 - ₹18,000
+    - Budget TWS earbuds: ₹600 - ₹2,500
+    - Student laptop (Core i5 / Ryzen 5 / MacBook): ₹18,000 - ₹48,000
+    - Lab instruments (Digital Multimeter, DSO, Drafter): ₹500 - ₹3,500
+    - Stationery (Pens, sets, folders): ₹20 - ₹150
+  * NEVER output US dollars ($). All numbers must be in INR (₹).
+  * NEVER output generic $80 placeholder numbers.
+  * Condition scaling: Like New ~= 85-90% of used fair market, Good ~= 70-75%, Fair ~= 50-60%.
 
 QUALITY RULES:
-  * If text is unreadable or a photo is unusable, still give your best
-    estimate from the remaining angles - do not refuse.
-  * ai_tags must include the brand, the model family, synonyms and use-cases
-    (e.g. "bose, soundlink, flex, bluetooth speaker, portable speaker,
-    wireless audio, waterproof speaker, party speaker, electronics, music box").
-  * JSON only. No code fences, no trailing commas."""
+  * Extract exact brand and model when text or logos are visible in any photo angle.
+  * ai_tags must include brand, model, synonyms, and practical college search queries.
+  * Return strict valid JSON only."""
 
 
 # =============================================================================
 # HTTP plumbing
 # =============================================================================
 def _download_image(url: str) -> tuple[bytes | None, str | None]:
-    """Fetch one photo server-side. Returns (bytes, mime) or (None, None)."""
+    """Fetch one photo server-side. Returns (bytes, mime) or (None, None).
+    Supports:
+      1. data: URIs (e.g. data:image/jpeg;base64,...)
+      2. Local files (uploads/..., /uploads/..., full path)
+      3. Remote http/https URLs
+    """
+    if not url or not isinstance(url, str):
+        return None, None
+
+    # 1. Base64 data URI
+    if url.startswith("data:"):
+        try:
+            header, b64_part = url.split(",", 1)
+            mime = header.split(";")[0].replace("data:", "").strip() or "image/jpeg"
+            data = base64.b64decode(b64_part)
+            if len(data) <= MAX_IMAGE_BYTES:
+                return data, mime
+        except Exception as exc:
+            logger.warning("vision_master: could not decode data URI: %s", exc)
+        return None, None
+
+    # 2. Local files in UPLOAD_DIR
+    try:
+        clean_url = url.split("?")[0].strip()
+        local_candidate = None
+        if "/uploads/" in clean_url:
+            filename = clean_url.split("/uploads/")[-1]
+            local_candidate = UPLOAD_DIR / filename
+        elif clean_url.startswith("uploads/"):
+            filename = clean_url.split("uploads/")[-1]
+            local_candidate = UPLOAD_DIR / filename
+        elif Path(clean_url).is_file():
+            local_candidate = Path(clean_url)
+
+        if local_candidate and local_candidate.is_file():
+            data = local_candidate.read_bytes()
+            if 0 < len(data) <= MAX_IMAGE_BYTES:
+                mime = _sniff_mime(data) or "image/jpeg"
+                return data, mime
+    except Exception as exc:
+        logger.warning("vision_master: local file candidate check failed: %s", exc)
+
+    # 3. HTTP / HTTPS download
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
             response = client.get(url)
@@ -368,15 +420,12 @@ def _gemini_url(base_url: str, model: str, api_key: str) -> str:
 def _gemini_body(prompt: str, images: list[dict[str, Any]]) -> dict[str, Any]:
     parts: list[dict[str, Any]] = [{"text": prompt}]
     for image in images:
-        if image["b64"]:
+        if image.get("b64"):
             parts.append(
                 {"inline_data": {"mime_type": image["mime"], "data": image["b64"]}}
             )
-        else:
-            # Download failed - let Gemini fetch the public URL itself.
-            parts.append(
-                {"file_data": {"mime_type": image["mime"], "file_uri": image["url"]}}
-            )
+        # Note: Do NOT attach file_data with external web URLs as Google Gemini
+        # rejects non-Files-API URIs with INVALID_ARGUMENT.
     return {
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.25},
@@ -436,19 +485,33 @@ def _invoke_vision_llm(
     api_key = config["ai_api_key"]
 
     if provider == "gemini":
-        payload = _post_json(
-            _gemini_url(config["ai_base_url"], model, api_key),
-            headers={"Content-Type": "application/json"},
-            body=_gemini_body(prompt, images),
-        )
-        candidates = payload.get("candidates") or []
-        if not candidates:
-            raise ValueError("gemini returned no candidates")
-        parts = ((candidates[0].get("content") or {}).get("parts")) or []
-        text = "".join(part.get("text", "") for part in parts)
-        if not text.strip():
-            raise ValueError("gemini returned empty content")
-        return text
+        gemini_models: list[str] = []
+        for candidate in [model, "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
+            if candidate and candidate not in gemini_models:
+                gemini_models.append(candidate)
+
+        last_exc: Exception | None = None
+        for m in gemini_models:
+            try:
+                payload = _post_json(
+                    _gemini_url(config["ai_base_url"], m, api_key),
+                    headers={"Content-Type": "application/json"},
+                    body=_gemini_body(prompt, images),
+                )
+                candidates = payload.get("candidates") or []
+                if not candidates:
+                    raise ValueError(f"gemini ({m}) returned no candidates")
+                parts = ((candidates[0].get("content") or {}).get("parts")) or []
+                text = "".join(part.get("text", "") for part in parts)
+                if not text.strip():
+                    raise ValueError(f"gemini ({m}) returned empty content")
+                return text
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Gemini vision model %s failed: %s; trying next fallback", m, exc)
+                continue
+        if last_exc:
+            raise last_exc
 
     base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
     body = _openai_body(prompt, images)
@@ -484,6 +547,11 @@ def _invoke_text_llm(
     api_key = config["ai_api_key"]
 
     if provider == "gemini":
+        gemini_models: list[str] = []
+        for candidate in [model, "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
+            if candidate and candidate not in gemini_models:
+                gemini_models.append(candidate)
+
         contents = [
             {"role": "user", "parts": [{"text": system}]},
         ]
@@ -495,20 +563,30 @@ def _invoke_text_llm(
                 }
             )
         contents.append({"role": "user", "parts": [{"text": user_message}]})
-        payload = _post_json(
-            _gemini_url(config["ai_base_url"], model, api_key),
-            headers={"Content-Type": "application/json"},
-            body={
-                "contents": contents,
-                "generationConfig": {"temperature": temperature},
-            },
-        )
-        candidates = payload.get("candidates") or []
-        parts = ((candidates[0].get("content") or {}).get("parts")) or [] if candidates else []
-        text = "".join(part.get("text", "") for part in parts)
-        if not text.strip():
-            raise ValueError("gemini returned empty content")
-        return text
+
+        last_exc: Exception | None = None
+        for m in gemini_models:
+            try:
+                payload = _post_json(
+                    _gemini_url(config["ai_base_url"], m, api_key),
+                    headers={"Content-Type": "application/json"},
+                    body={
+                        "contents": contents,
+                        "generationConfig": {"temperature": temperature},
+                    },
+                )
+                candidates = payload.get("candidates") or []
+                parts = ((candidates[0].get("content") or {}).get("parts")) or [] if candidates else []
+                text = "".join(part.get("text", "") for part in parts)
+                if not text.strip():
+                    raise ValueError(f"gemini ({m}) returned empty content")
+                return text
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Gemini text model %s failed: %s; trying next fallback", m, exc)
+                continue
+        if last_exc:
+            raise last_exc
 
     base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
     messages = [{"role": "system", "content": system}]
@@ -533,33 +611,33 @@ def _invoke_text_llm(
 # =============================================================================
 # (keyword set, category, price floor/ceiling) - first match wins.
 _INR_ITEM_RULES: tuple[tuple[tuple[str, ...], str, float, float], ...] = (
-    (("bose", "soundlink", "jbl", "bluetooth speaker", "speaker", "soundbar"),
-     "Electronics", 4000, 7500),
-    (("earbuds", "airpods", "earphone", "headphone", "headset", "neckband"),
-     "Electronics", 500, 3000),
-    (("laptop", "notebook pc", "macbook"), "Electronics", 12000, 45000),
-    (("phone", "iphone", "android", "smartphone"), "Electronics", 5000, 20000),
-    (("calculator",), "Electronics", 300, 900),
-    (("watch", "smartwatch", "fitness band"), "Electronics", 800, 6000),
-    (("drone", "camera", "webcam"), "Electronics", 2500, 15000),
-    (("pen", "pencil", "marker", "highlighter", "refill"), "Stationery", 10, 50),
-    (("notebook", "sticky notes", "file", "folder", "geometry box"),
-     "Stationery", 40, 250),
-    (("textbook", "book", "manual", "guide", "edition", "math", "notes"),
-     "Academic Material", 250, 450),
+    (("bose", "soundlink", "jbl", "bluetooth speaker", "speaker", "soundbar", "audio"),
+     "Electronics", 4500, 11500),
+    (("earbuds", "airpods", "earphone", "headphone", "headset", "neckband", "tws"),
+     "Electronics", 600, 4500),
+    (("laptop", "notebook pc", "macbook", "thinkpad"), "Electronics", 15000, 55000),
+    (("phone", "iphone", "android", "smartphone", "oneplus", "samsung"), "Electronics", 6000, 30000),
+    (("calculator", "casio", "fx-991"), "Electronics", 500, 1200),
+    (("watch", "smartwatch", "fitness band", "apple watch"), "Electronics", 1000, 8000),
+    (("drone", "camera", "webcam", "gopro"), "Electronics", 3000, 20000),
+    (("pen", "pencil", "marker", "highlighter", "refill"), "Stationery", 20, 80),
+    (("notebook", "sticky notes", "file", "folder", "geometry box", "register"),
+     "Stationery", 50, 300),
+    (("textbook", "book", "manual", "guide", "edition", "math", "notes", "cengage"),
+     "Academic Material", 300, 750),
     (("multimeter", "drafter", "oscilloscope", "solder", "lab", "protractor",
-      "vernier", "calliper", "microscope"),
-     "Lab Gear & Instruments", 400, 3000),
-    (("bedsheet", "pillow", "mug", "lamp", "fan", "hostel", "curtain", "mat"),
-     "Hostel & Lifestyle", 100, 800),
+      "vernier", "calliper", "microscope", "breadboard", "arduino"),
+     "Lab Gear & Instruments", 450, 3500),
+    (("bedsheet", "pillow", "mug", "lamp", "fan", "hostel", "curtain", "mat", "kettle"),
+     "Hostel & Lifestyle", 150, 1200),
 )
 
 _CATEGORY_DEFAULT_RANGE: dict[str, tuple[float, float]] = {
-    "Electronics": (1500, 8000),
-    "Academic Material": (250, 500),
-    "Lab Gear & Instruments": (400, 3000),
-    "Stationery": (30, 200),
-    "Hostel & Lifestyle": (150, 1000),
+    "Electronics": (2000, 12000),
+    "Academic Material": (300, 800),
+    "Lab Gear & Instruments": (500, 3500),
+    "Stationery": (40, 250),
+    "Hostel & Lifestyle": (200, 1500),
 }
 
 _CONDITION_FACTOR = {"Like New": 0.9, "Good": 0.7, "Fair": 0.5}

@@ -246,78 +246,78 @@ class _FeedScreenState extends State<FeedScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: 16,
-        title: const Row(
+        titleSpacing: 12,
+        title: Row(
           children: [
-            ClipRRect(
+            const ClipRRect(
               borderRadius: BorderRadius.all(Radius.circular(8)),
               child: Image(
                 image: AssetImage('assets/logo.png'),
-                width: 30,
-                height: 30,
+                width: 34,
+                height: 34,
                 fit: BoxFit.cover,
               ),
             ),
-            SizedBox(width: 10),
-            Text.rich(
-              TextSpan(
-                style: TextStyle(
-                  fontFamily: 'Georgia',
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.3,
+            const SizedBox(width: 10),
+            Expanded(
+              child: Container(
+                height: 42,
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceHigh,
+                  borderRadius: BorderRadius.circular(21),
+                  border: Border.all(color: AppColors.hairline),
                 ),
-                children: [
-                  TextSpan(
-                    text: 'Campus Mart',
-                    style: TextStyle(
-                      color: AppColors.inkBlack,
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _onSearchChanged,
+                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 13.5),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    hintText: 'Search campus listings...',
+                    hintStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    prefixIcon: const Icon(
+                      Icons.search,
+                      color: AppColors.textMuted,
+                      size: 19,
                     ),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(
+                              Icons.clear,
+                              color: AppColors.textMuted,
+                              size: 16,
+                            ),
+                            padding: EdgeInsets.zero,
+                            onPressed: () {
+                              _searchDebounce?.cancel();
+                              _searchController.clear();
+                              setState(() => _query = '');
+                              context.read<ProductProvider>().loadProducts(query: '');
+                            },
+                          ),
                   ),
-                  TextSpan(
-                    text: ' Ai',
-                    style: TextStyle(
-                      color: AppColors.royalBlue,
-                    ),
-                  ),
-                ],
+                ),
               ),
+            ),
+            const SizedBox(width: 4),
+            IconButton(
+              icon: const Icon(Icons.notifications_none_rounded, color: AppColors.inkBlack, size: 23),
+              tooltip: 'Notifications',
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('All caught up! No new notifications.'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
             ),
           ],
-        ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(64),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: TextField(
-              controller: _searchController,
-              onChanged: _onSearchChanged,
-              style: const TextStyle(color: AppColors.textPrimary),
-              decoration: InputDecoration(
-                hintText: 'Search campus listings...',
-                prefixIcon: const Icon(
-                  Icons.search,
-                  color: AppColors.textMuted,
-                  size: 20,
-                ),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        icon: const Icon(
-                          Icons.clear,
-                          color: AppColors.textMuted,
-                          size: 18,
-                        ),
-                        onPressed: () {
-                          _searchDebounce?.cancel();
-                          _searchController.clear();
-                          setState(() => _query = '');
-                          context.read<ProductProvider>().loadProducts(query: '');
-                        },
-                      ),
-              ),
-            ),
-          ),
         ),
       ),
       body: Column(
@@ -613,12 +613,12 @@ class _AiRecommendationRail extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 200,
+          height: 215,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
             itemCount: picks.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 12),
+            separatorBuilder: (context, index) => const SizedBox(width: 14),
             itemBuilder: (context, index) {
               final product = picks[index];
               return _RecommendationCard(
@@ -633,7 +633,7 @@ class _AiRecommendationRail extends StatelessWidget {
   }
 }
 
-/// Compact card used inside the AI recommendation rail.
+/// Wide editorial card used inside the AI recommendation rail.
 class _RecommendationCard extends StatelessWidget {
   const _RecommendationCard({
     required this.product,
@@ -649,14 +649,14 @@ class _RecommendationCard extends StatelessWidget {
     final below = suggested != null && suggested > 0 && product.listedPrice < suggested;
 
     return SizedBox(
-      width: 156,
+      width: 210,
       child: Material(
         color: AppColors.surface,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
           side: const BorderSide(
             color: AppColors.hairline,
-            width: 1,
+            width: 1.2,
           ),
         ),
         clipBehavior: Clip.antiAlias,
@@ -665,7 +665,9 @@ class _RecommendationCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
+              SizedBox(
+                height: 115,
+                width: double.infinity,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -691,96 +693,131 @@ class _RecommendationCard extends StatelessWidget {
                                       ),
                           ),
                     if (below)
+                      Positioned(
+                        top: 8,
+                        left: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
+                          decoration: BoxDecoration(
+                            color: AppColors.forestGreen,
+                            borderRadius: BorderRadius.circular(6),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.18),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            'SAVE ₹${(suggested - product.listedPrice).round()}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ),
+                      )
+                    else
                       const Positioned(
-                        top: 6,
-                        left: 6,
+                        top: 8,
+                        left: 8,
                         child: _AiPickBadge(),
                       ),
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.65),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.shield, size: 10.5, color: Colors.white),
+                            const SizedBox(width: 3),
+                            Text(
+                              (product.sellerTrustScore ?? 5.0).toStringAsFixed(1),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(9, 8, 9, 10),
+                padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       product.title,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppColors.textPrimary,
-                        fontSize: 12,
-                        height: 1.25,
+                        fontSize: 13,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 5),
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
                       children: [
-                        Expanded(
-                          child: Text(
-                            formatInr(product.listedPrice),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                        Text(
+                          formatInr(product.listedPrice),
+                          style: const TextStyle(
+                            color: AppColors.inkBlack,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                        if (below) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            formatInr(suggested),
                             style: const TextStyle(
-                              color: AppColors.inkBlack,
-                              fontSize: 14.5,
-                              fontWeight: FontWeight.w800,
+                              color: AppColors.textMuted,
+                              fontSize: 11.5,
+                              decoration: TextDecoration.lineThrough,
+                              fontWeight: FontWeight.w500,
                             ),
                           ),
-                        ),
-                        const Icon(
-                          Icons.shield_outlined,
-                          size: 13,
-                          color: AppColors.royalBlue,
-                        ),
-                        const SizedBox(width: 2),
+                        ],
+                        const Spacer(),
                         Text(
-                          (product.sellerTrustScore ?? 5.0).toStringAsFixed(1),
-                          style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    if (below)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: AppColors.forestGreen.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          'Save ₹${(suggested - product.listedPrice).round()}',
-                          style: const TextStyle(
-                            color: AppColors.forestGreen,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      )
-                    else
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: AppColors.royalBlue.withOpacity(0.08),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
                           product.category,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            color: AppColors.royalBlue,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
+                            color: AppColors.textMuted,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${product.condition} condition',
+                      style: const TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w500,
                       ),
+                    ),
                   ],
                 ),
               ),

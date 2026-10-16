@@ -951,6 +951,7 @@ class _BottomBuyBar extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
+            flex: 4,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -971,7 +972,7 @@ class _BottomBuyBar extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: sold ? AppColors.textMuted : AppColors.inkBlack,
-                    fontSize: 20,
+                    fontSize: 18.5,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -980,58 +981,68 @@ class _BottomBuyBar extends StatelessWidget {
           ),
           if (showChat) ...[
             const SizedBox(width: 8),
-            OutlinedButton.icon(
-              onPressed: onChat,
-              icon: const Icon(Icons.chat_bubble_outline, size: 16),
-              label: const Text('Chat'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.royalBlue,
-                side: BorderSide(
-                  color: AppColors.royalBlue.withOpacity(0.5),
-                  width: 1.2,
+            Expanded(
+              flex: 5,
+              child: OutlinedButton.icon(
+                onPressed: onChat,
+                icon: const Icon(Icons.chat_bubble_outline, size: 15),
+                label: const Text(
+                  'Chat with Seller',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.royalBlue,
+                  side: BorderSide(
+                    color: AppColors.royalBlue.withOpacity(0.55),
+                    width: 1.2,
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: const Size(0, 46),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  textStyle: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 6,
+            child: FilledButton(
+              onPressed: canBuy ? onBuy : null,
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.inkBlack,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
                 minimumSize: const Size(0, 46),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
                 textStyle: const TextStyle(
                   fontWeight: FontWeight.w700,
-                  fontSize: 13,
+                  fontSize: 12.5,
                 ),
               ),
-            ),
-          ],
-          const SizedBox(width: 8),
-          FilledButton(
-            onPressed: canBuy ? onBuy : null,
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.inkBlack,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              minimumSize: Size(showChat ? 130 : 170, 46),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              textStyle: const TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-              ),
-            ),
-            child: isPurchasing
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.2,
-                      color: Colors.white,
+              child: isPurchasing
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(
+                      _label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  )
-                : Text(
-                    _label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+            ),
           ),
         ],
       ),
@@ -1185,6 +1196,20 @@ class _HeroGalleryState extends State<_HeroGallery> {
     super.dispose();
   }
 
+  void _openLightbox(int initialIndex, List<String> images) {
+    if (images.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => _LightboxViewer(
+          images: images,
+          initialIndex: initialIndex,
+          category: widget.product.category,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final category = widget.product.category;
@@ -1194,15 +1219,25 @@ class _HeroGalleryState extends State<_HeroGallery> {
       fit: StackFit.expand,
       children: [
         if (photos.isEmpty)
-          _DetailImage(url: widget.product.imageUrl, category: category)
+          GestureDetector(
+            onTap: () {
+              if (widget.product.imageUrl.isNotEmpty) {
+                _openLightbox(0, [widget.product.imageUrl]);
+              }
+            },
+            child: _DetailImage(url: widget.product.imageUrl, category: category),
+          )
         else
           PageView.builder(
             controller: _controller,
             itemCount: photos.length,
             onPageChanged: (page) => setState(() => _page = page),
-            itemBuilder: (context, index) => _DetailImage(
-              url: photos[index],
-              category: category,
+            itemBuilder: (context, index) => GestureDetector(
+              onTap: () => _openLightbox(index, photos),
+              child: _DetailImage(
+                url: photos[index],
+                category: category,
+              ),
             ),
           ),
         const DecoratedBox(
@@ -1321,6 +1356,123 @@ class _AiTagsBlock extends StatelessWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+/// Full-screen zoomable lightbox viewer for inspecting photos from all angles.
+class _LightboxViewer extends StatefulWidget {
+  const _LightboxViewer({
+    required this.images,
+    required this.initialIndex,
+    required this.category,
+  });
+
+  final List<String> images;
+  final int initialIndex;
+  final String category;
+
+  @override
+  State<_LightboxViewer> createState() => _LightboxViewerState();
+}
+
+class _LightboxViewerState extends State<_LightboxViewer> {
+  late final PageController _pageController;
+  late int _currentIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.initialIndex;
+    _pageController = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black.withOpacity(0.85),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: Text(
+          'Photo ${_currentIndex + 1} of ${widget.images.length}',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+      body: Stack(
+        alignment: Alignment.bottomCenter,
+        children: [
+          PageView.builder(
+            controller: _pageController,
+            itemCount: widget.images.length,
+            onPageChanged: (index) => setState(() => _currentIndex = index),
+            itemBuilder: (context, index) {
+              final url = widget.images[index];
+              return InteractiveViewer(
+                minScale: 1.0,
+                maxScale: 4.0,
+                child: Center(
+                  child: url.isEmpty
+                      ? ImageFallbackIcon(category: widget.category, size: 64)
+                      : Image.network(
+                          url,
+                          fit: BoxFit.contain,
+                          loadingBuilder: (context, child, progress) {
+                            if (progress == null) return child;
+                            return const Center(
+                              child: CircularProgressIndicator(
+                                color: Colors.white70,
+                                strokeWidth: 2.5,
+                              ),
+                            );
+                          },
+                          errorBuilder: (context, error, stack) =>
+                              ImageFallbackIcon(category: widget.category, size: 64),
+                        ),
+                ),
+              );
+            },
+          ),
+          if (widget.images.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 24),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(
+                  widget.images.length,
+                  (index) => Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: index == _currentIndex ? 16 : 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: index == _currentIndex
+                          ? AppColors.royalBlue
+                          : Colors.white38,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

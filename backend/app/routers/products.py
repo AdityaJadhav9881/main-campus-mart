@@ -253,10 +253,17 @@ def create_product(
     db.commit()
     db.refresh(product)
 
-    # Task: "Product Listed" confirmation - queued so the HTTP response never
-    # waits on Brevo, and email_service swallows any network failure.
+    product_snapshot = {
+        "title": product.title,
+        "category": product.category,
+        "condition": product.condition,
+        "listed_price": product.listed_price,
+        "suggested_price": product.suggested_price,
+        "status": product.status,
+        "image_url": product.image_url,
+    }
     background.add_task(
-        send_listing_published_email, seller_email, seller_name, product
+        send_listing_published_email, seller_email, seller_name, product_snapshot
     )
     return product
 

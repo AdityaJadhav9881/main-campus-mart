@@ -520,12 +520,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 onTap: () {
                   _otpController.text = fallback;
                   setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Instant verification code applied!'),
-                      duration: Duration(seconds: 2),
-                    ),
-                  );
+                  _submit();
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),

@@ -153,7 +153,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.photo_camera_outlined,
-                  color: AppColors.cyanAccent),
+                  color: AppColors.royalBlue),
               title: const Text('Take a photo',
                   style: TextStyle(color: AppColors.textPrimary)),
               subtitle: const Text('Use the camera right now',
@@ -162,7 +162,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.photo_library_outlined,
-                  color: AppColors.cyanAccent),
+                  color: AppColors.royalBlue),
               title: const Text('Choose from gallery',
                   style: TextStyle(color: AppColors.textPrimary)),
               subtitle: const Text('Pick an existing picture',
@@ -225,7 +225,6 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
           ),
         ),
       );
-      if (_photosComplete) _maybeAutoScan();
     } on ApiException catch (error) {
       if (!mounted) return;
       messenger.showSnackBar(
@@ -313,18 +312,11 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       _photos.add(url);
       _analysis = null;
     });
-    if (_photosComplete) _maybeAutoScan();
   }
 
   // ---------------------------------------------------------------------------
-  // Task 3: 4-photo Vision AI scan (auto after the 4th photo)
+  // Task 3: 4-photo Vision AI scan (triggered by "Scan 4 Photos with AI")
   // ---------------------------------------------------------------------------
-
-  void _maybeAutoScan() {
-    if (_photosComplete && !_isScanning && _analysis == null) {
-      _runAiScan();
-    }
-  }
 
   /// POST /products/analyze-images with the 4 CDN URLs, then auto-fill the
   /// untouched fields from the strict-JSON reply.
@@ -373,7 +365,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
 
       messenger.showSnackBar(
         SnackBar(
-          backgroundColor: AppColors.cyanAccent.withOpacity(0.94),
+          backgroundColor: AppColors.royalBlue.withOpacity(0.94),
           content: Text(
             result.isLiveVision
                 ? 'AI vision scan complete (${result.source}) - listing '
@@ -559,12 +551,14 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
               _buildPhotoGrid(),
               const SizedBox(height: 12),
               _buildScanStatus(),
-              const SizedBox(height: 16),
-              _AiEstimateBanner(
-                title: _titleController.text,
-                condition: _condition,
-                age: _ageController.text,
-              ),
+              if (_photosComplete && _analysis != null) ...[
+                const SizedBox(height: 16),
+                _AiEstimateBanner(
+                  title: _titleController.text,
+                  condition: _condition,
+                  age: _ageController.text,
+                ),
+              ],
               const SizedBox(height: 20),
               TextFormField(
                 controller: _titleController,
@@ -702,7 +696,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
               style: TextStyle(
                 color: _photosComplete
                     ? AppColors.success
-                    : AppColors.cyanAccent,
+                    : AppColors.royalBlue,
                 fontSize: 12,
                 fontWeight: FontWeight.w800,
               ),
@@ -763,7 +757,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
         borderRadius: BorderRadius.circular(14),
         side: BorderSide(
           color: hasPhoto
-              ? AppColors.cyanAccent.withOpacity(0.45)
+              ? AppColors.royalBlue.withOpacity(0.45)
               : AppColors.hairline,
           width: 1.2,
         ),
@@ -832,7 +826,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
                       height: 24,
                       child: CircularProgressIndicator(
                         strokeWidth: 2.4,
-                        color: AppColors.cyanAccent,
+                        color: AppColors.royalBlue,
                       ),
                     ),
                     SizedBox(height: 8),
@@ -882,14 +876,14 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.photo_camera_outlined,
-                  color: AppColors.cyanAccent),
+                  color: AppColors.royalBlue),
               title: const Text('Take a photo',
                   style: TextStyle(color: AppColors.textPrimary)),
               onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
             ),
             ListTile(
               leading: const Icon(Icons.photo_library_outlined,
-                  color: AppColors.cyanAccent),
+                  color: AppColors.royalBlue),
               title: const Text('Choose from gallery',
                   style: TextStyle(color: AppColors.textPrimary)),
               onTap: () => Navigator.of(sheetContext).pop(ImageSource.gallery),
@@ -910,9 +904,9 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       return Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: AppColors.cyanAccent.withOpacity(0.08),
+          color: AppColors.royalBlue.withOpacity(0.08),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.cyanAccent.withOpacity(0.4)),
+          border: Border.all(color: AppColors.royalBlue.withOpacity(0.4)),
         ),
         child: const Row(
           children: [
@@ -921,7 +915,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
               height: 20,
               child: CircularProgressIndicator(
                 strokeWidth: 2.4,
-                color: AppColors.cyanAccent,
+                color: AppColors.royalBlue,
               ),
             ),
             SizedBox(width: 12),
@@ -946,10 +940,10 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       return OutlinedButton.icon(
         onPressed: _runAiScan,
         icon: const Icon(Icons.auto_awesome, size: 16),
-        label: const Text('Run AI Photo Scan'),
+        label: const Text('Scan 4 Photos with AI'),
         style: OutlinedButton.styleFrom(
-          foregroundColor: AppColors.cyanAccent,
-          side: BorderSide(color: AppColors.cyanAccent.withOpacity(0.5)),
+          foregroundColor: AppColors.royalBlue,
+          side: BorderSide(color: AppColors.royalBlue.withOpacity(0.5)),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
@@ -1018,7 +1012,7 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             'AI fair range $rangeLabel · suggested '
             '${formatInr(analysis.suggestedPriceInr)}',
             style: const TextStyle(
-              color: AppColors.cyanAccent,
+              color: AppColors.royalBlue,
               fontSize: 12.5,
               fontWeight: FontWeight.w700,
             ),
@@ -1102,21 +1096,21 @@ class _AiEstimateBanner extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: AppColors.cyanAccent.withOpacity(hasInput ? 0.10 : 0.05),
+        color: AppColors.royalBlue.withOpacity(hasInput ? 0.10 : 0.05),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.cyanAccent.withOpacity(0.35)),
+        border: Border.all(color: AppColors.royalBlue.withOpacity(0.35)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Row(
             children: [
-              Icon(Icons.auto_awesome, size: 14, color: AppColors.cyanAccent),
+              Icon(Icons.auto_awesome, size: 14, color: AppColors.royalBlue),
               SizedBox(width: 6),
               Text(
                 'AI Smart Estimate',
                 style: TextStyle(
-                  color: AppColors.cyanAccent,
+                  color: AppColors.royalBlue,
                   fontSize: 12,
                   fontWeight: FontWeight.w800,
                   letterSpacing: 0.4,
@@ -1210,7 +1204,7 @@ class _AiAnalysisLoadingState extends State<_AiAnalysisLoading>
             height: 26,
             child: CircularProgressIndicator(
               strokeWidth: 2.8,
-              color: AppColors.cyanAccent,
+              color: AppColors.royalBlue,
             ),
           ),
           SizedBox(height: 14),
@@ -1218,7 +1212,7 @@ class _AiAnalysisLoadingState extends State<_AiAnalysisLoading>
             'AI Orchestrator is analyzing listing & verifying price...',
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: AppColors.cyanAccent,
+              color: AppColors.royalBlue,
               fontSize: 13,
               fontWeight: FontWeight.w600,
               height: 1.4,

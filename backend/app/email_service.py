@@ -305,13 +305,24 @@ def send_listing_published_email(
 ) -> bool:
     """Notify the seller that their listing went live (or is under review).
 
-    `product` only needs scalar attributes (title, category, condition,
-    listed_price, suggested_price, status, image_url) so a detached ORM row
-    from a FastAPI BackgroundTask works fine.
+    `product` can be a detached ORM row or a snapshot dict.
     """
-    subject = f"Your listing '{product.title}' is live on Campus Mart Ai!"
+    def _get(key, default=None):
+        if isinstance(product, dict):
+            return product.get(key, default)
+        return getattr(product, key, default)
 
-    moderation = product.status == "flagged"
+    title = _get("title", "Item")
+    status = _get("status", "active")
+    category = _get("category", "General")
+    condition = _get("condition", "Good")
+    listed_price = _get("listed_price", 0.0)
+    suggested_price = _get("suggested_price")
+    image_url = _get("image_url")
+
+    subject = f"Your listing '{title}' is live on Campus Mart Ai!"
+
+    moderation = status == "flagged"
     status_pill = (
         _pill("Under Moderation Review", _WARN)
         if moderation
@@ -325,11 +336,11 @@ def send_listing_published_email(
     )
 
     rows = (
-        _row("Product", product.title)
-        + _row("Category", product.category)
-        + _row("Condition", product.condition)
-        + _row("Listed Price", _inr(product.listed_price))
-        + _row("AI Suggested Fair Price", _inr(product.suggested_price))
+        _row("Product", title)
+        + _row("Category", category)
+        + _row("Condition", condition)
+        + _row("Listed Price", _inr(listed_price))
+        + _row("AI Suggested Fair Price", _inr(suggested_price))
         + _row("Trust &amp; Safety Status", status_pill)
     )
 
@@ -341,7 +352,7 @@ def send_listing_published_email(
                 line-height:1.6;">
         {status_note}
       </p>
-      {_image_html(product.image_url)}
+      {_image_html(image_url)}
       <table width="100%" cellpadding="0" cellspacing="0"
              style="border:1px solid #e2e8f0; border-radius:12px;
                     border-collapse:separate; overflow:hidden;">
@@ -373,15 +384,29 @@ def send_product_sold_emails(
     return sent_seller and sent_buyer
 
 
+def _val(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 def _send_sold_to_seller(seller, buyer, product, final_price: float) -> bool:
-    subject = f"🎉 Sold! '{product.title}' was purchased on Campus Mart Ai"
-    trust = getattr(seller, "trust_score", None)
+    title = _val(product, "title", "Item")
+    condition = _val(product, "condition", "Good")
+    image_url = _val(product, "image_url")
+    seller_name = _val(seller, "name", "Seller")
+    seller_email = _val(seller, "email")
+    buyer_name = _val(buyer, "name", "Buyer")
+    buyer_email = _val(buyer, "email")
+    trust = _val(seller, "trust_score", 5.0)
+
+    subject = f"🎉 Sold! '{title}' was purchased on Campus Mart Ai"
     rows = (
-        _row("Item Sold", product.title)
-        + _row("Condition", product.condition)
+        _row("Item Sold", title)
+        + _row("Condition", condition)
         + _row("Sale Price", _inr(final_price))
-        + _row("Buyer", buyer.name)
-        + _row("Buyer Email", buyer.email)
+        + _row("Buyer", buyer_name)
+        + _row("Buyer Email", buyer_email)
         + _row(
             "Your Trust Score",
             _pill(
@@ -392,14 +417,14 @@ def _send_sold_to_seller(seller, buyer, product, final_price: float) -> bool:
     )
     body = f"""
       <p style="margin:0 0 14px 0; color:{_TEXT}; font-size:14px;">
-        Congrats {seller.name} - it's sold! 🎉
+        Congrats {seller_name} - it's sold! 🎉
       </p>
       <p style="margin:0 0 10px 0; color:{_MUTED}; font-size:14px;
                 line-height:1.6;">
         A student just bought your listing. Meet up on campus to hand over
         the item, and your trust score just went up for the smooth sale.
       </p>
-      {_image_html(product.image_url)}
+      {_image_html(image_url)}
       <table width="100%" cellpadding="0" cellspacing="0"
              style="border:1px solid #e2e8f0; border-radius:12px;
                     border-collapse:separate; overflow:hidden;">
@@ -411,29 +436,38 @@ def _send_sold_to_seller(seller, buyer, product, final_price: float) -> bool:
         Discover feed automatically.
       </p>
     """
-    return _send_email(seller.email, subject, _shell("Item sold", body))
+    return _send_email(seller_email, subject, _shell("Item sold", body))
 
 
 def _send_order_to_buyer(seller, buyer, product, final_price: float) -> bool:
-    subject = f"Order Confirmed: '{product.title}' on Campus Mart Ai"
+    title = _val(product, "title", "Item")
+    category = _val(product, "category", "General")
+    condition = _val(product, "condition", "Good")
+    image_url = _val(product, "image_url")
+    seller_name = _val(seller, "name", "Seller")
+    seller_email = _val(seller, "email")
+    buyer_name = _val(buyer, "name", "Buyer")
+    buyer_email = _val(buyer, "email")
+
+    subject = f"Order Confirmed: '{title}' on Campus Mart Ai"
     rows = (
-        _row("Item", product.title)
-        + _row("Category", product.category)
-        + _row("Condition", product.condition)
+        _row("Item", title)
+        + _row("Category", category)
+        + _row("Condition", condition)
         + _row("Price Paid", _inr(final_price))
-        + _row("Seller", seller.name)
-        + _row("Seller Email", seller.email)
+        + _row("Seller", seller_name)
+        + _row("Seller Email", seller_email)
     )
     body = f"""
       <p style="margin:0 0 14px 0; color:{_TEXT}; font-size:14px;">
-        Thanks {buyer.name} - your order is confirmed!
+        Thanks {buyer_name} - your order is confirmed!
       </p>
       <p style="margin:0 0 10px 0; color:{_MUTED}; font-size:14px;
                 line-height:1.6;">
         You bought this item on Campus Mart Ai. Arrange the campus pickup
         with your seller using the in-app Messages tab.
       </p>
-      {_image_html(product.image_url)}
+      {_image_html(image_url)}
       <table width="100%" cellpadding="0" cellspacing="0"
              style="border:1px solid #e2e8f0; border-radius:12px;
                     border-collapse:separate; overflow:hidden;">

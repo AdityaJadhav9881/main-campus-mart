@@ -251,7 +251,7 @@ class _SuggestionChips extends StatelessWidget {
               label: Text(suggestion),
               onPressed: () => onPick(suggestion),
               backgroundColor: AppColors.surface,
-              side: BorderSide(color: AppColors.cyanAccent.withOpacity(0.35)),
+              side: BorderSide(color: AppColors.royalBlue.withOpacity(0.35)),
               labelStyle: const TextStyle(
                 color: AppColors.textPrimary,
                 fontSize: 12,
@@ -292,7 +292,7 @@ class _TurnBubble extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
             decoration: BoxDecoration(
               color: mine
-                  ? AppColors.cyanAccent.withOpacity(0.16)
+                  ? AppColors.royalBlue.withOpacity(0.16)
                   : AppColors.surface,
               borderRadius: BorderRadius.only(
                 topLeft: const Radius.circular(14),
@@ -302,7 +302,7 @@ class _TurnBubble extends StatelessWidget {
               ),
               border: Border.all(
                 color: mine
-                    ? AppColors.cyanAccent.withOpacity(0.4)
+                    ? AppColors.royalBlue.withOpacity(0.4)
                     : AppColors.hairline,
               ),
             ),
@@ -412,7 +412,7 @@ class _RecommendedCard extends StatelessWidget {
                     Text(
                       formatInr(resolved.listedPrice),
                       style: const TextStyle(
-                        color: AppColors.cyanAccent,
+                        color: AppColors.royalBlue,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w800,
                       ),
@@ -450,7 +450,7 @@ class _ThinkingBubble extends StatelessWidget {
             height: 10,
             child: LinearProgressIndicator(
               backgroundColor: AppColors.surfaceHigh,
-              color: AppColors.cyanAccent,
+              color: AppColors.royalBlue,
               minHeight: 4,
             ),
           ),
@@ -491,7 +491,7 @@ class _Composer extends StatelessWidget {
             ),
             const SizedBox(width: 10),
             Material(
-              color: AppColors.cyanAccent,
+              color: AppColors.royalBlue,
               shape: const CircleBorder(),
               child: InkWell(
                 customBorder: const CircleBorder(),

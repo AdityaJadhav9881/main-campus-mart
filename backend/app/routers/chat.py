@@ -26,6 +26,7 @@ Design notes
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -309,16 +310,36 @@ _CATALOG_FALLBACK_INTRO = (
 )
 
 
+STEM_SYNONYMS: dict[str, list[str]] = {
+    "speaker": ["soundlink", "bose", "bluetooth", "audio", "jbl", "speaker", "soundbar"],
+    "speakers": ["soundlink", "bose", "bluetooth", "audio", "jbl", "speaker", "soundbar"],
+    "calculator": ["casio", "calculator", "fx-991", "scientific", "classwiz"],
+    "calculators": ["casio", "calculator", "fx-991", "scientific", "classwiz"],
+    "book": ["book", "textbook", "notes", "edition", "academic", "guide", "manual", "cengage"],
+    "books": ["book", "textbook", "notes", "edition", "academic", "guide", "manual", "cengage"],
+    "textbook": ["book", "textbook", "notes", "edition", "academic", "guide", "manual"],
+    "textbooks": ["book", "textbook", "notes", "edition", "academic", "guide", "manual"],
+    "laptop": ["laptop", "macbook", "notebook", "computer", "thinkpad", "dell", "hp", "pc"],
+    "laptops": ["laptop", "macbook", "notebook", "computer", "thinkpad", "dell", "hp", "pc"],
+    "lab": ["lab", "multimeter", "drafter", "instruments", "oscilloscope", "vernier", "calliper", "breadboard", "arduino"],
+    "headphone": ["headphone", "earphone", "airpods", "earbuds", "audio", "tws", "wireless"],
+    "headphones": ["headphone", "earphone", "airpods", "earbuds", "audio", "tws", "wireless"],
+    "phone": ["phone", "smartphone", "iphone", "android", "mobile", "oneplus", "samsung"],
+    "phones": ["phone", "smartphone", "iphone", "android", "mobile", "oneplus", "samsung"],
+    "stationery": ["pen", "pencil", "stationery", "notebook", "register", "marker", "folder"],
+}
+
+
 def _local_catalog_reply(
     message: str,
     products: list[Product],
 ) -> tuple[str, list[UUID]]:
     """Smart campus marketplace assistant engine for live active products."""
     msg_lower = (message or "").strip().lower()
-    tokens = [
+    raw_tokens = [
         token
         for token in msg_lower.split()
-        if len(token) > 2 and token not in {"the", "and", "for", "with", "want", "show", "tell", "give", "please"}
+        if len(token) > 2 and token not in {"the", "and", "for", "with", "want", "show", "tell", "give", "please", "have", "you"}
     ]
 
     is_deal_query = any(
@@ -355,20 +376,34 @@ def _local_catalog_reply(
         )
         return "\n\n".join(lines), [product.id for product in top]
 
+    # Gather search tokens including synonyms
+    extra_tokens: set[str] = set()
+    for word, syns in STEM_SYNONYMS.items():
+        if word in msg_lower or any(t.startswith(word) for t in raw_tokens):
+            extra_tokens.update(syns)
+
+    all_search_tokens = set(raw_tokens) | extra_tokens
+
     scored: list[tuple[int, Product]] = []
     for product in products:
+        title_lower = product.title.lower()
         haystack = " ".join(
             filter(
                 None,
                 [
-                    product.title.lower(),
+                    title_lower,
                     product.description.lower(),
                     product.category.lower(),
                     (product.ai_tags or "").lower(),
                 ],
             )
         )
-        score = sum(1 for token in tokens if token in haystack)
+        score = 0
+        for token in all_search_tokens:
+            if token in title_lower:
+                score += 3
+            elif token in haystack:
+                score += 1
         if score:
             scored.append((score, product))
     scored.sort(key=lambda pair: (-pair[0], pair[1].listed_price))
@@ -388,7 +423,7 @@ def _local_catalog_reply(
                     f"({product.condition}, {product.category})"
                 )
             lines.append(
-                "Feel free to ask about specific gear (e.g., 'calculator', 'electronics', 'books') or ask for price advice in ₹!"
+                "Feel free to ask about specific gear (e.g., 'calculator', 'electronics', 'books', 'speaker') or ask for price advice in ₹!"
             )
             return "\n\n".join(lines), [product.id for product in top_default]
         return (
@@ -415,13 +450,27 @@ def _local_catalog_reply(
 
 
 def _recommended_ids(reply: str, products: list[Product]) -> list[UUID]:
-    """Ids of live products the LLM reply actually mentioned (by title)."""
+    """Ids of live products the LLM reply actually mentioned (by title, id or keyword)."""
     lowered = reply.lower()
     ids: list[UUID] = []
+    # 1. Exact UUID or exact title match
     for product in products:
-        title = product.title.strip()
-        if len(title) > 6 and title.lower() in lowered:
-            ids.append(product.id)
+        if str(product.id) in reply:
+            if product.id not in ids:
+                ids.append(product.id)
+        elif len(product.title.strip()) > 4 and product.title.strip().lower() in lowered:
+            if product.id not in ids:
+                ids.append(product.id)
+        if len(ids) >= 5:
+            return ids
+
+    # 2. Key phrase match (e.g. brand + model or distinctive words in title)
+    for product in products:
+        title_words = [w for w in re.findall(r"[a-z0-9]+", product.title.lower()) if len(w) > 3]
+        if len(title_words) >= 2:
+            match_count = sum(1 for w in title_words if w in lowered)
+            if match_count >= 2 and product.id not in ids:
+                ids.append(product.id)
         if len(ids) >= 5:
             break
     return ids

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/product.dart';
 import '../providers/auth_provider.dart';
@@ -244,15 +245,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
             color: AppColors.textPrimary,
           ),
         ),
-        actions: [
-          IconButton(
-            tooltip: 'Log out',
-            icon: const Icon(Icons.logout, size: 21, color: AppColors.danger),
-            onPressed:
-                auth.isLoading ? null : () => _confirmLogout(context, auth),
-          ),
-          const SizedBox(width: 6),
-        ],
       ),
       body: RefreshIndicator(
         color: AppColors.royalBlue,
@@ -1183,17 +1175,28 @@ class _HelpAndSupportCard extends StatelessWidget {
           const SizedBox(height: 12),
           InkWell(
             borderRadius: BorderRadius.circular(10),
-            onTap: () {
-              Clipboard.setData(
+            onTap: () async {
+              final uri = Uri.parse(
+                'mailto:martaicampus@gmail.com?subject=CampusMart%20Support%20Inquiry',
+              );
+              try {
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri);
+                  return;
+                }
+              } catch (_) {}
+              await Clipboard.setData(
                 const ClipboardData(text: 'martaicampus@gmail.com'),
               );
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Support email copied: martaicampus@gmail.com',
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Support email copied: martaicampus@gmail.com',
+                    ),
                   ),
-                ),
-              );
+                );
+              }
             },
             child: const Padding(
               padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
@@ -1224,7 +1227,7 @@ class _HelpAndSupportCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Icon(Icons.copy, size: 15, color: AppColors.textMuted),
+                  Icon(Icons.open_in_new, size: 15, color: AppColors.royalBlue),
                 ],
               ),
             ),
@@ -1232,17 +1235,28 @@ class _HelpAndSupportCard extends StatelessWidget {
           const SizedBox(height: 6),
           InkWell(
             borderRadius: BorderRadius.circular(10),
-            onTap: () {
-              Clipboard.setData(
+            onTap: () async {
+              final uri = Uri.parse(
+                'mailto:support@campusmart.in?subject=CampusMart%20Support%20Inquiry',
+              );
+              try {
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri);
+                  return;
+                }
+              } catch (_) {}
+              await Clipboard.setData(
                 const ClipboardData(text: 'support@campusmart.in'),
               );
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Support email copied: support@campusmart.in',
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Support email copied: support@campusmart.in',
+                    ),
                   ),
-                ),
-              );
+                );
+              }
             },
             child: const Padding(
               padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
