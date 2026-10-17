@@ -62,13 +62,18 @@ class NotificationService {
   }
 
   /// Begin (or re-target) polling for [token].
+  bool _initializedBaseline = false;
+
+  /// Begin (or re-target) polling for [token].
   void start(String token) {
     if (token.isEmpty) return;
     if (_token == token && _timer != null) return;
     _token = token;
+    _initializedBaseline = false;
     _timer?.cancel();
-    _timer = Timer.periodic(_pollInterval, (_) => refresh());
-    refresh(announce: true);
+    _timer = Timer.periodic(_pollInterval, (_) => refresh(announce: true));
+    // Initial fetch: seed existing notifications into announced set to avoid flooding alerts
+    refresh(announce: false, isInitialBootstrap: true);
   }
 
   /// Stop polling and clear the badge (logout / terminated session).
@@ -77,23 +82,30 @@ class NotificationService {
     _timer = null;
     _token = '';
     _announcedIds.clear();
+    _initializedBaseline = false;
     unreadCount.value = 0;
     latestFeed.value = null;
   }
 
   /// Fetch the feed now. [announce] posts Android notifications for any
   /// unread alert not yet surfaced (manual bell opens pass false).
-  Future<void> refresh({bool announce = false}) async {
+  Future<void> refresh({bool announce = false, bool isInitialBootstrap = false}) async {
     final token = _token;
     if (token.isEmpty || _isFetching) return;
     _isFetching = true;
     try {
-      final feed = await _api.fetchNotifications(token: token);
+      final feed = await _api.fetchNotifications(token: token, markPushed: true);
       latestFeed.value = feed;
       unreadCount.value = feed.unreadCount;
-      if (announce) {
+
+      if (isInitialBootstrap || !_initializedBaseline) {
         for (final item in feed.notifications) {
-          if (!item.isRead && _announcedIds.add(item.id)) {
+          _announcedIds.add(item.id);
+        }
+        _initializedBaseline = true;
+      } else if (announce) {
+        for (final item in feed.notifications) {
+          if (!item.isRead && !item.isPushed && _announcedIds.add(item.id)) {
             await _showSystemNotification(item);
           }
         }

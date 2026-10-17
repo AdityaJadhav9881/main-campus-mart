@@ -11,6 +11,7 @@ class AppNotification {
     required this.createdAt,
     this.referenceId,
     this.isRead = false,
+    this.isPushed = false,
   });
 
   factory AppNotification.fromJson(Map<String, dynamic> json) {
@@ -21,6 +22,7 @@ class AppNotification {
       type: json['type']?.toString() ?? 'system',
       referenceId: json['reference_id']?.toString(),
       isRead: json['is_read'] == true,
+      isPushed: json['is_pushed'] == true,
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
     );
@@ -39,9 +41,10 @@ class AppNotification {
   final String? referenceId;
 
   final bool isRead;
+  final bool isPushed;
   final DateTime createdAt;
 
-  AppNotification copyWith({bool? isRead}) {
+  AppNotification copyWith({bool? isRead, bool? isPushed}) {
     return AppNotification(
       id: id,
       title: title,
@@ -49,6 +52,7 @@ class AppNotification {
       type: type,
       referenceId: referenceId,
       isRead: isRead ?? this.isRead,
+      isPushed: isPushed ?? this.isPushed,
       createdAt: createdAt,
     );
   }

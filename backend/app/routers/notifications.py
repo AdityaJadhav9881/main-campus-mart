@@ -47,6 +47,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 def list_notifications(
     limit: int = Query(default=60, ge=1, le=200),
     unread_only: bool = Query(default=False),
+    mark_pushed: bool = Query(default=False),
     token: dict = Depends(verify_firebase_token),
     db: Session = Depends(get_db),
 ) -> NotificationListResponse:
@@ -67,6 +68,16 @@ def list_notifications(
         .limit(limit)
         .all()
     )
+
+    if mark_pushed and rows:
+        needs_commit = False
+        for r in rows:
+            if not r.is_pushed:
+                r.is_pushed = True
+                needs_commit = True
+        if needs_commit:
+            db.commit()
+
     return NotificationListResponse(
         notifications=[NotificationRead.model_validate(row) for row in rows],
         unread_count=unread_count,

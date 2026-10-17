@@ -91,6 +91,10 @@ _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("transactions", "order_notes", "TEXT"),
     ("transactions", "otp_code", "VARCHAR(8)"),
     ("transactions", "order_status", "VARCHAR(40) DEFAULT 'Requested / Processing'"),
+    # --- Background notifications & WebRTC signaling -------------------------
+    ("notifications", "is_pushed", "BOOLEAN DEFAULT FALSE"),
+    ("call_sessions", "caller_ice_candidates_json", "TEXT"),
+    ("call_sessions", "receiver_ice_candidates_json", "TEXT"),
 )
 
 # Brand-new tables that older databases predate. `create_all` covers them on

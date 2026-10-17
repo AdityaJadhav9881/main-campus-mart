@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models/ai_analysis.dart';
 import '../models/product.dart';
@@ -9,6 +8,7 @@ import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
 import '../services/api_service.dart';
 import '../services/currency.dart';
+import '../services/permission_service.dart';
 import '../widgets/app_theme.dart';
 
 /// Tab 1 - "Sell on Campus Mart Ai" (Task 3: mandatory 4-photo vision flow).
@@ -601,20 +601,18 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
             child: const Text('View Feed', style: TextStyle(color: AppColors.textMuted)),
           ),
           FilledButton.icon(
-            onPressed: () async {
+            onPressed: () {
               Navigator.of(ctx).pop();
               final text = product.whatsappShareText ??
                   '🔥 *${product.title}* listed on CampusMart for *${formatInr(product.listedPrice)}*!\n'
                   'Check it out on CampusMart AI: https://campusmart-api-zia4.onrender.com/products/${product.id}';
-              final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
-              try {
-                if (await canLaunchUrl(url)) {
-                  await launchUrl(url, mode: LaunchMode.externalApplication);
-                }
-              } catch (_) {}
+              PermissionService.shareText(
+                text: text,
+                title: 'Share "${product.title}" via',
+              );
             },
             icon: const Icon(Icons.share, size: 16),
-            label: const Text('Share to WhatsApp Groups'),
+            label: const Text('Share to WhatsApp / Campus'),
             style: FilledButton.styleFrom(
               backgroundColor: const Color(0xFF25D366),
               foregroundColor: Colors.white,

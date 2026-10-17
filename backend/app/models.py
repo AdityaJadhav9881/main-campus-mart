@@ -719,6 +719,7 @@ class Notification(Base):
     reference_id = Column(String(64), nullable=True)
 
     is_read = Column(Boolean, nullable=False, default=False, index=True)
+    is_pushed = Column(Boolean, nullable=False, default=False, index=True)
 
     created_at = Column(
         DateTime(timezone=True),
@@ -912,6 +913,8 @@ class CallSession(Base):
 
     sdp_offer = Column(Text, nullable=True)
     sdp_answer = Column(Text, nullable=True)
+    caller_ice_candidates_json = Column(Text, nullable=True)
+    receiver_ice_candidates_json = Column(Text, nullable=True)
     audio_chunks_json = Column(Text, nullable=True)
 
     started_at = Column(

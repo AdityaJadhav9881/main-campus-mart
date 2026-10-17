@@ -823,8 +823,12 @@ class ApiService {
   // ---------------------------------------------------------------------------
 
   /// GET /notifications/ - newest-first feed + unread badge count.
-  Future<NotificationFeed> fetchNotifications({required String token}) async {
-    final response = await _get('/notifications/', token: token);
+  Future<NotificationFeed> fetchNotifications({
+    required String token,
+    bool markPushed = false,
+  }) async {
+    final path = markPushed ? '/notifications/?mark_pushed=true' : '/notifications/';
+    final response = await _get(path, token: token);
     if (response.statusCode != 200) throw _apiError(response);
     return NotificationFeed.fromJson(_decodeMap(response));
   }
@@ -1019,6 +1023,16 @@ class ApiService {
     return CallSession.fromJson(_decodeMap(response));
   }
 
+  Future<CallSession> cancelCall(String callId, {required String token}) async {
+    final response = await _post(
+      '/calls/$callId/cancel',
+      body: <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
   Future<CallSession> declineCall(String callId, {required String token}) async {
     final response = await _post(
       '/calls/$callId/decline',
@@ -1039,22 +1053,37 @@ class ApiService {
     return CallSession.fromJson(_decodeMap(response));
   }
 
-  Future<CallSession> signalCall(
+  Future<Map<String, dynamic>> signalCall(
     String callId, {
+    String? sdpOffer,
     String? sdpAnswer,
-    String? audioChunkBase64,
+    String? iceCandidate,
+    bool? isCaller,
+    String? audioChunk,
     required String token,
   }) async {
     final response = await _post(
       '/calls/$callId/signal',
       body: <String, dynamic>{
+        if (sdpOffer != null) 'sdp_offer': sdpOffer,
         if (sdpAnswer != null) 'sdp_answer': sdpAnswer,
-        if (audioChunkBase64 != null) 'audio_chunk_base64': audioChunkBase64,
+        if (iceCandidate != null) 'ice_candidate': iceCandidate,
+        if (isCaller != null) 'is_caller': isCaller,
+        if (audioChunk != null) 'audio_chunk': audioChunk,
       },
       token: token,
     );
     if (response.statusCode != 200) throw _apiError(response);
-    return CallSession.fromJson(_decodeMap(response));
+    return _decodeMap(response);
+  }
+
+  Future<Map<String, dynamic>> fetchCallSignal(
+    String callId, {
+    required String token,
+  }) async {
+    final response = await _get('/calls/$callId/signal', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
   }
 
   // ---------------------------------------------------------------------------

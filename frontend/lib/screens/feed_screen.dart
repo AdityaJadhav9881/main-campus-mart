@@ -12,6 +12,7 @@ import '../services/api_service.dart';
 import '../services/currency.dart';
 import '../services/local_cache_service.dart';
 import '../services/notification_service.dart';
+import '../services/permission_service.dart';
 import '../services/recommendations.dart';
 import '../widgets/animated_brand_logo.dart';
 import '../widgets/app_theme.dart';
@@ -1213,6 +1214,26 @@ class _FeedScreenState extends State<FeedScreen> {
                     },
                   ),
                 ],
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF15803D),
+                    side: const BorderSide(color: Color(0xFF15803D)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  icon: const Icon(Icons.share_rounded, size: 18),
+                  label: const Text('Share Request to Campus / WhatsApp'),
+                  onPressed: () {
+                    final budgetStr = req.maxBudget != null ? ' Budget: ${formatInr(req.maxBudget!)}' : '';
+                    final text = '📢 *Campus Request: ${req.title}*$budgetStr\n'
+                        '${req.description}\n'
+                        'Requested by ${req.requesterName} on CampusMart AI!';
+                    PermissionService.shareText(
+                      text: text,
+                      title: 'Share Request via',
+                    );
+                  },
+                ),
               ],
             ),
           ),

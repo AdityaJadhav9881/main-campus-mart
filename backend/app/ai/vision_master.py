@@ -71,43 +71,33 @@ PROVIDERS: tuple[str, ...] = (
 DEFAULT_PROVIDER = "gemini"
 # Latest GA Gemini Flash on the v1beta REST API. Never ship a model id Google
 # has not announced - an unknown id makes every vision call 404.
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Tried in order whenever the configured gemini model errors. First entry in
 # the effective chain is always the (normalized) configured model.
 GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
     "gemini-1.5-flash",
 )
 
-# Model ids that look plausible but do not exist on the REST API. Map them to
-# the nearest real model so a stale admin dashboard value self-heals instead
-# of 404-ing on every request.
+# Model ids that look plausible but need normalization.
 _GEMINI_MODEL_ALIASES: dict[str, str] = {
-    "gemini-3.5-flash": "gemini-2.5-flash",
-    "gemini-3.5-flash-lite": "gemini-2.5-flash",
-    "gemini-3.5-pro": "gemini-2.5-pro",
-    "gemini-3.6-flash": "gemini-2.5-flash",
-    "gemini-3-flash": "gemini-2.5-flash",
+    "gemini-3.5-flash-lite": "gemini-3.5-flash",
+    "gemini-3-flash": "gemini-3.5-flash",
     "gemini-3-pro": "gemini-2.5-pro",
 }
 
 
 def normalize_gemini_model(model: str | None) -> str:
-    """Map a stored/legacy gemini model id onto a real REST API model.
-
-    Known invalid ids (e.g. 'gemini-3.5-flash') are aliased; any other
-    'gemini-3*' experiment collapses to the latest GA flash.
-    """
+    """Map a stored/legacy gemini model id onto a real REST API model."""
     cleaned = (model or "").strip()
     if not cleaned:
         return GEMINI_FALLBACK_MODELS[0]
     if cleaned in _GEMINI_MODEL_ALIASES:
         return _GEMINI_MODEL_ALIASES[cleaned]
-    lowered = cleaned.lower()
-    if lowered.startswith("gemini-3"):
-        return GEMINI_FALLBACK_MODELS[0]
     return cleaned
 
 
@@ -751,6 +741,30 @@ def _openai_text(payload: dict[str, Any]) -> str:
     return content
 
 
+GROQ_FALLBACK_MODELS: tuple[str, ...] = (
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+)
+OPENAI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gpt-4o-mini",
+    "gpt-4o",
+)
+
+
+def _openai_compatible_models(provider: str, model: str) -> list[str]:
+    chain = [model] if model else []
+    if provider == "groq":
+        for fb in GROQ_FALLBACK_MODELS:
+            if fb not in chain:
+                chain.append(fb)
+    elif provider == "openai":
+        for fb in OPENAI_FALLBACK_MODELS:
+            if fb not in chain:
+                chain.append(fb)
+    return chain or [model]
+
+
 def _invoke_vision_llm(
     config: dict[str, str],
     prompt: str,
@@ -804,25 +818,33 @@ def _invoke_vision_llm(
         if last_exc:
             raise last_exc
 
-    model = config["ai_model"]
-    base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
+    base = (config["ai_base_url"] or PROVIDER_BASE_URLS.get(provider, "")).rstrip("/")
     body = _openai_body(prompt, images)
-    body["model"] = model
-    payload = _post_json(
-        f"{base}/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            # OpenRouter asks for this; harmless elsewhere.
-            **(
-                {"HTTP-Referer": "https://campusmart.ai"}
-                if provider == "openrouter"
-                else {}
-            ),
-        },
-        body=body,
-    )
-    return _openai_text(payload), model
+    last_exc: Exception | None = None
+    for model in _openai_compatible_models(provider, config["ai_model"]):
+        body["model"] = model
+        try:
+            payload = _post_json(
+                f"{base}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    # OpenRouter asks for this; harmless elsewhere.
+                    **(
+                        {"HTTP-Referer": "https://campusmart.ai"}
+                        if provider == "openrouter"
+                        else {}
+                    ),
+                },
+                body=body,
+            )
+            return _openai_text(payload), model
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Provider %s vision model %s failed: %s", provider, model, exc)
+    if last_exc:
+        raise last_exc
+    return "", config["ai_model"]
 
 
 def _invoke_text_llm(
@@ -910,8 +932,7 @@ def _invoke_text_llm(
         if last_exc:
             raise last_exc
 
-    model = config["ai_model"]
-    base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
+    base = (config["ai_base_url"] or PROVIDER_BASE_URLS.get(provider, "")).rstrip("/")
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(
         {"role": str(turn.get("role", "user")), "content": str(turn.get("content", ""))}
@@ -929,15 +950,30 @@ def _invoke_text_llm(
         messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": user_message})
-    payload = _post_json(
-        f"{base}/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        body={"model": model, "messages": messages, "temperature": temperature},
-    )
-    return _openai_text(payload), model
+
+    last_exc: Exception | None = None
+    for model in _openai_compatible_models(provider, config["ai_model"]):
+        try:
+            payload = _post_json(
+                f"{base}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    **(
+                        {"HTTP-Referer": "https://campusmart.ai"}
+                        if provider == "openrouter"
+                        else {}
+                    ),
+                },
+                body={"model": model, "messages": messages, "temperature": temperature},
+            )
+            return _openai_text(payload), model
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Provider %s text model %s failed: %s", provider, model, exc)
+    if last_exc:
+        raise last_exc
+    return "", config["ai_model"]
 
 
 # =============================================================================

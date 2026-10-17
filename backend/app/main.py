@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -174,3 +174,9 @@ app.include_router(wanted.router)       # /wanted/* campus request board & AI ma
 def read_root() -> dict:
     """Liveness probe - confirms the API process is up and serving requests."""
     return {"status": "CampusMart API is running"}
+
+
+@app.websocket("/ws/calls/{call_id}")
+async def ws_calls_alias(websocket: WebSocket, call_id: str):
+    """Direct alias for /calls/ws/{call_id} signaling socket."""
+    await calls.call_signaling_websocket(websocket, call_id)

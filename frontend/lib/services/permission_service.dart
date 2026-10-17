@@ -52,5 +52,15 @@ class PermissionService {
       await _channel.invokeMethod('stopBackgroundService');
     } catch (_) {}
   }
+
+  /// Shares listing or request text via native Android share chooser (WhatsApp, Gmail, etc.)
+  static Future<void> shareText({required String text, String title = 'Share via'}) async {
+    try {
+      await _channel.invokeMethod('shareText', {
+        'text': text,
+        'title': title,
+      });
+    } catch (_) {}
+  }
 }
 

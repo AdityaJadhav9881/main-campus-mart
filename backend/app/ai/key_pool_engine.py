@@ -75,10 +75,10 @@ PROVIDER_BASE_URLS: dict[str, str] = {
 }
 
 DEFAULT_MODELS: dict[str, str] = {
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-3.5-flash",
     "openai": "gpt-4o-mini",
-    "groq": "llama-3.3-70b-versatile",
-    "openrouter": "google/gemini-2.5-flash",
+    "groq": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openrouter": "google/gemini-3.5-flash",
     "mistral": "mistral-small-latest",
     "cerebras": "llama-3.3-70b",
 }
@@ -178,6 +178,10 @@ def get_key_pool(db: Session) -> list[PoolKey]:
     Falls back to the legacy single-key rows so existing installs keep
     running with zero migration.
     """
+    try:
+        db.expire_all()
+    except Exception:
+        pass
     row = db.get(SystemConfig, POOL_CONFIG_KEY)
     raw = (row.value or "").strip() if row is not None else ""
     if not raw:

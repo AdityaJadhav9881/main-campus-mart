@@ -986,6 +986,8 @@ class CallSessionRead(BaseModel):
     status: str
     sdp_offer: str | None = None
     sdp_answer: str | None = None
+    caller_ice_candidates_json: str | None = None
+    receiver_ice_candidates_json: str | None = None
     started_at: datetime
     connected_at: datetime | None = None
     ended_at: datetime | None = None
@@ -996,6 +998,8 @@ class CallSignalRequest(BaseModel):
     sdp_offer: str | None = None
     sdp_answer: str | None = None
     audio_chunk: str | None = None
+    ice_candidate: str | None = None
+    is_caller: bool | None = None
 
 
 class AiKeyTestResponse(BaseModel):
@@ -1242,6 +1246,7 @@ class NotificationRead(BaseModel):
     type: str
     reference_id: str | None = None
     is_read: bool
+    is_pushed: bool = False
     created_at: datetime
 
 

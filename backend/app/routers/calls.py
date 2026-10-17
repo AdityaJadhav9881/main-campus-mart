@@ -11,12 +11,13 @@ Powers real-time voice and video calls between students with:
   5. Automatic call logging into chat_messages on decline / end.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 
 from ..auth import get_or_create_current_user, verify_firebase_token
@@ -31,6 +32,33 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/calls", tags=["Calls & Signaling"])
+
+# In-memory registry of active WebSockets per call room
+_call_sockets: dict[str, set[WebSocket]] = {}
+
+
+def _notify_sockets_sync(call_id: str, data: dict) -> None:
+    """Safely dispatches a JSON event to all connected WebSockets for call_id."""
+    sockets = list(_call_sockets.get(call_id, set()))
+    if not sockets:
+        return
+    text = json.dumps(data)
+
+    async def _send_all():
+        for ws in sockets:
+            try:
+                await ws.send_text(text)
+            except Exception:
+                pass
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_send_all())
+    except RuntimeError:
+        try:
+            asyncio.run(_send_all())
+        except Exception:
+            pass
 
 
 def _current_user(
@@ -66,6 +94,8 @@ def _to_read(session: CallSession) -> CallSessionRead:
         status=session.status,
         sdp_offer=session.sdp_offer,
         sdp_answer=session.sdp_answer,
+        caller_ice_candidates_json=session.caller_ice_candidates_json,
+        receiver_ice_candidates_json=session.receiver_ice_candidates_json,
         started_at=session.started_at,
         connected_at=session.connected_at,
         ended_at=session.ended_at,
@@ -197,6 +227,48 @@ def get_call_session(
 
 
 @router.post(
+    "/{call_id}/cancel",
+    response_model=CallSessionRead,
+    summary="Cancel a ringing call (Phone 1 Caller)",
+)
+def cancel_call(
+    call_id: UUID,
+    current_user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+) -> CallSessionRead:
+    """Phone 1 caller cancels the call while still ringing."""
+    call = db.query(CallSession).filter(CallSession.id == call_id).first()
+    if not call:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
+    if call.caller_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only caller can cancel.")
+
+    call.status = "cancelled"
+    call.ended_at = _utcnow()
+
+    # Log into chat thread if product is attached
+    if call.product_id:
+        db.add(
+            ChatMessage(
+                product_id=call.product_id,
+                sender_id=call.caller_id,
+                receiver_id=call.receiver_id,
+                message=f"📞 Cancelled {call.call_type} call",
+            )
+        )
+
+    db.commit()
+    db.refresh(call)
+    logger.info("Call %s cancelled by caller %s", call.id, current_user.email)
+    _notify_sockets_sync(str(call.id), {
+        "type": "call_cancelled",
+        "status": "cancelled",
+        "call_id": str(call.id),
+    })
+    return _to_read(call)
+
+
+@router.post(
     "/{call_id}/answer",
     response_model=CallSessionRead,
     summary="Answer an incoming call (Phone 2)",
@@ -216,12 +288,27 @@ def answer_call(
 
     call.status = "connected"
     call.connected_at = _utcnow()
-    if payload and payload.sdp_answer:
-        call.sdp_answer = payload.sdp_answer
+    if payload:
+        if payload.sdp_answer:
+            call.sdp_answer = payload.sdp_answer
+        if payload.ice_candidate:
+            try:
+                candidates = json.loads(call.receiver_ice_candidates_json or "[]")
+            except Exception:
+                candidates = []
+            if payload.ice_candidate not in candidates:
+                candidates.append(payload.ice_candidate)
+                call.receiver_ice_candidates_json = json.dumps(candidates)
 
     db.commit()
     db.refresh(call)
     logger.info("Call %s answered by receiver %s", call.id, current_user.email)
+    _notify_sockets_sync(str(call.id), {
+        "type": "call_answered",
+        "status": "connected",
+        "call_id": str(call.id),
+        "sdp_answer": call.sdp_answer,
+    })
     return _to_read(call)
 
 
@@ -259,6 +346,11 @@ def decline_call(
     db.commit()
     db.refresh(call)
     logger.info("Call %s declined by %s", call.id, current_user.email)
+    _notify_sockets_sync(str(call.id), {
+        "type": "call_declined",
+        "status": "declined",
+        "call_id": str(call.id),
+    })
     return _to_read(call)
 
 
@@ -302,12 +394,17 @@ def end_call(
     db.commit()
     db.refresh(call)
     logger.info("Call %s ended (duration: %ss)", call.id, duration_sec)
+    _notify_sockets_sync(str(call.id), {
+        "type": "call_ended",
+        "status": "ended",
+        "call_id": str(call.id),
+    })
     return _to_read(call)
 
 
 @router.post(
     "/{call_id}/signal",
-    summary="Exchange WebRTC SDP or audio chunks",
+    summary="Exchange WebRTC SDP, ICE candidates, or audio chunks",
 )
 def send_call_signal(
     call_id: UUID,
@@ -315,17 +412,31 @@ def send_call_signal(
     current_user: User = Depends(_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Saves SDP offer/answer or appends audio chunk for the other peer."""
+    """Saves SDP offer/answer, ICE candidates, or audio chunks for the other peer."""
     call = db.query(CallSession).filter(CallSession.id == call_id).first()
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
     if current_user.id not in (call.caller_id, call.receiver_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
 
+    is_caller = (current_user.id == call.caller_id) if payload.is_caller is None else payload.is_caller
+
     if payload.sdp_offer:
         call.sdp_offer = payload.sdp_offer
     if payload.sdp_answer:
         call.sdp_answer = payload.sdp_answer
+
+    if payload.ice_candidate:
+        col = "caller_ice_candidates_json" if is_caller else "receiver_ice_candidates_json"
+        raw = getattr(call, col) or "[]"
+        try:
+            cand_list = json.loads(raw)
+        except Exception:
+            cand_list = []
+        if payload.ice_candidate not in cand_list:
+            cand_list.append(payload.ice_candidate)
+            setattr(call, col, json.dumps(cand_list))
+
     if payload.audio_chunk:
         try:
             chunks = json.loads(call.audio_chunks_json or "[]")
@@ -340,24 +451,49 @@ def send_call_signal(
         call.audio_chunks_json = json.dumps(chunks[-20:])
 
     db.commit()
+
+    # Forward to WebSocket room
+    _notify_sockets_sync(str(call.id), {
+        "type": "signal",
+        "sender_id": str(current_user.id),
+        "is_caller": is_caller,
+        "sdp_offer": payload.sdp_offer,
+        "sdp_answer": payload.sdp_answer,
+        "ice_candidate": payload.ice_candidate,
+    })
+
     return {"status": "ok"}
 
 
 @router.get(
     "/{call_id}/signal",
-    summary="Read latest WebRTC SDP and audio chunks",
+    summary="Read latest WebRTC SDP, ICE candidates, and audio chunks",
 )
 def get_call_signal(
     call_id: UUID,
     current_user: User = Depends(_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Fetches SDP offer, answer, and audio chunks from peer."""
+    """Fetches SDP offer, answer, ICE candidates, and audio chunks from peer."""
     call = db.query(CallSession).filter(CallSession.id == call_id).first()
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
     if current_user.id not in (call.caller_id, call.receiver_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
+
+    is_caller = (current_user.id == call.caller_id)
+
+    try:
+        caller_cands = json.loads(call.caller_ice_candidates_json or "[]")
+    except Exception:
+        caller_cands = []
+
+    try:
+        receiver_cands = json.loads(call.receiver_ice_candidates_json or "[]")
+    except Exception:
+        receiver_cands = []
+
+    peer_cands = receiver_cands if is_caller else caller_cands
 
     try:
         chunks = json.loads(call.audio_chunks_json or "[]")
@@ -372,5 +508,35 @@ def get_call_signal(
         "status": call.status,
         "sdp_offer": call.sdp_offer,
         "sdp_answer": call.sdp_answer,
+        "is_caller": is_caller,
+        "peer_ice_candidates": peer_cands,
+        "caller_ice_candidates": caller_cands,
+        "receiver_ice_candidates": receiver_cands,
         "peer_audio_chunks": peer_chunks,
     }
+
+
+@router.websocket("/ws/{call_id}")
+async def call_signaling_websocket(websocket: WebSocket, call_id: str):
+    """High-speed real-time WebSocket connection for low-latency WebRTC signaling & hang-up sync."""
+    await websocket.accept()
+    if call_id not in _call_sockets:
+        _call_sockets[call_id] = set()
+    _call_sockets[call_id].add(websocket)
+    try:
+        while True:
+            text = await websocket.receive_text()
+            # Broadcast to all other peers in the room
+            other_sockets = [ws for ws in _call_sockets.get(call_id, set()) if ws != websocket]
+            for ws in other_sockets:
+                try:
+                    await ws.send_text(text)
+                except Exception:
+                    pass
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if call_id in _call_sockets:
+            _call_sockets[call_id].discard(websocket)
+            if not _call_sockets[call_id]:
+                _call_sockets.pop(call_id, None)

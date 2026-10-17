@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models/product.dart';
 import '../providers/wishlist_provider.dart';
 import '../services/currency.dart';
+import '../services/permission_service.dart';
 import 'app_theme.dart';
 import 'category_icon.dart';
 import 'condition_badge.dart';
@@ -134,16 +134,14 @@ class ProductCard extends StatelessWidget {
                       _TrustPill(score: product.sellerTrustScore),
                       const SizedBox(width: 6),
                       InkWell(
-                        onTap: () async {
+                        onTap: () {
                           final text = product.whatsappShareText ??
                               '🔥 *${product.title}* listed on CampusMart for *${formatInr(product.listedPrice)}*!\n'
                               'Check it on CampusMart: https://campusmart-api-zia4.onrender.com/products/${product.id}';
-                          final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
-                          try {
-                            if (await canLaunchUrl(url)) {
-                              await launchUrl(url, mode: LaunchMode.externalApplication);
-                            }
-                          } catch (_) {}
+                          PermissionService.shareText(
+                            text: text,
+                            title: 'Share "${product.title}" via',
+                          );
                         },
                         borderRadius: BorderRadius.circular(8),
                         child: Container(

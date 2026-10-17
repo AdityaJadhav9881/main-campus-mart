@@ -83,10 +83,22 @@ class MainActivity : FlutterActivity() {
                             .putString("user_token", token)
                             .putString("user_id", userId)
                             .apply()
+                        if (apiUrl.isNotEmpty() && token.isNotEmpty()) {
+                            CampusMartBackgroundService.startService(applicationContext)
+                        }
                     } catch (_: Exception) {}
                     result.success(true)
                 }
                 "stopBackgroundService" -> {
+                    try {
+                        CampusMartBackgroundService.stopService(applicationContext)
+                    } catch (_: Exception) {}
+                    result.success(true)
+                }
+                "shareText" -> {
+                    val text = call.argument<String>("text") ?: ""
+                    val title = call.argument<String>("title") ?: "Share via"
+                    shareText(text, title)
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -229,6 +241,20 @@ class MainActivity : FlutterActivity() {
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
             NotificationManagerCompat.from(this).notify(id, builder.build())
+        } catch (_: Exception) {}
+    }
+
+    private fun shareText(text: String, title: String) {
+        try {
+            val sendIntent = Intent().apply {
+                action = Intent.ACTION_SEND
+                putExtra(Intent.EXTRA_TEXT, text)
+                type = "text/plain"
+            }
+            val shareIntent = Intent.createChooser(sendIntent, title).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(shareIntent)
         } catch (_: Exception) {}
     }
 

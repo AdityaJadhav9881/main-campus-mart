@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models/product.dart';
 import '../providers/auth_provider.dart';
@@ -10,6 +9,7 @@ import '../providers/cart_provider.dart';
 import '../providers/product_provider.dart';
 import '../providers/wishlist_provider.dart';
 import '../services/currency.dart';
+import '../services/permission_service.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/category_icon.dart';
 import '../widgets/condition_badge.dart';
@@ -144,16 +144,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       );
   }
 
-  void _openWhatsAppShare() async {
+  void _openWhatsAppShare() {
     final text = widget.product.whatsappShareText ??
         '🔥 *${widget.product.title}* listed on CampusMart for *${formatInr(widget.product.listedPrice)}*!\n'
         'Check it out on CampusMart AI: https://campusmart-api-zia4.onrender.com/products/${widget.product.id}';
-    final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
-    try {
-      if (await canLaunchUrl(url)) {
-        await launchUrl(url, mode: LaunchMode.externalApplication);
-      }
-    } catch (_) {}
+    PermissionService.shareText(
+      text: text,
+      title: 'Share "${widget.product.title}" via',
+    );
   }
 
   @override

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/call_session.dart';
 import '../services/api_service.dart';
@@ -38,6 +40,7 @@ class IncomingCallOverlay extends StatefulWidget {
 class _IncomingCallOverlayState extends State<IncomingCallOverlay>
     with SingleTickerProviderStateMixin {
   late final AnimationController _pulseController;
+  Timer? _statusPollTimer;
   bool _actionTaken = false;
 
   @override
@@ -49,10 +52,35 @@ class _IncomingCallOverlayState extends State<IncomingCallOverlay>
     )..repeat(reverse: true);
 
     PermissionService.startRingtone();
+
+    // Fast 800ms poll: dismiss immediately if caller cancels or call terminates
+    _statusPollTimer = Timer.periodic(const Duration(milliseconds: 800), (_) async {
+      if (_actionTaken) return;
+      try {
+        final session = await ApiService.instance.fetchCallSession(
+          widget.call.id,
+          token: widget.token,
+        );
+        if (!mounted || _actionTaken) return;
+        if (session.status == 'cancelled' ||
+            session.status == 'ended' ||
+            session.status == 'declined' ||
+            session.status == 'missed' ||
+            session.isEnded) {
+          _actionTaken = true;
+          _statusPollTimer?.cancel();
+          await PermissionService.stopRingtone();
+          if (mounted) {
+            Navigator.of(context).pop();
+          }
+        }
+      } catch (_) {}
+    });
   }
 
   @override
   void dispose() {
+    _statusPollTimer?.cancel();
     PermissionService.stopRingtone();
     _pulseController.dispose();
     super.dispose();
@@ -61,6 +89,7 @@ class _IncomingCallOverlayState extends State<IncomingCallOverlay>
   Future<void> _answer() async {
     if (_actionTaken) return;
     _actionTaken = true;
+    _statusPollTimer?.cancel();
     await PermissionService.stopRingtone();
     try {
       await ApiService.instance.answerCall(widget.call.id, token: widget.token);
@@ -84,6 +113,7 @@ class _IncomingCallOverlayState extends State<IncomingCallOverlay>
   Future<void> _decline() async {
     if (_actionTaken) return;
     _actionTaken = true;
+    _statusPollTimer?.cancel();
     await PermissionService.stopRingtone();
     try {
       await ApiService.instance.declineCall(widget.call.id, token: widget.token);

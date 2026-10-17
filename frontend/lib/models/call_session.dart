@@ -13,6 +13,8 @@ class CallSession {
     this.productTitle,
     this.sdpOffer,
     this.sdpAnswer,
+    this.callerIceCandidatesJson,
+    this.receiverIceCandidatesJson,
     this.connectedAt,
     this.endedAt,
   });
@@ -30,6 +32,8 @@ class CallSession {
       status: json['status']?.toString() ?? 'ringing',
       sdpOffer: json['sdp_offer']?.toString(),
       sdpAnswer: json['sdp_answer']?.toString(),
+      callerIceCandidatesJson: json['caller_ice_candidates_json']?.toString(),
+      receiverIceCandidatesJson: json['receiver_ice_candidates_json']?.toString(),
       startedAt: DateTime.tryParse(json['started_at']?.toString() ?? '') ??
           DateTime.now(),
       connectedAt: DateTime.tryParse(json['connected_at']?.toString() ?? ''),
@@ -48,13 +52,19 @@ class CallSession {
   final String status;
   final String? sdpOffer;
   final String? sdpAnswer;
+  final String? callerIceCandidatesJson;
+  final String? receiverIceCandidatesJson;
   final DateTime startedAt;
   final DateTime? connectedAt;
   final DateTime? endedAt;
 
   bool get isRinging => status == 'ringing';
   bool get isConnected => status == 'connected';
-  bool get isEnded => status == 'ended' || status == 'declined' || status == 'missed';
+  bool get isEnded =>
+      status == 'ended' ||
+      status == 'declined' ||
+      status == 'missed' ||
+      status == 'cancelled';
 
   Map<String, dynamic> toJson() => {
         'id': id,
