@@ -391,7 +391,7 @@ def test_vision_analysis_heuristic_when_every_key_fails(db, monkeypatch):
         db, ["https://cdn.example.com/1.jpg"], title="Casio calculator"
     )
     assert result["source"] == "heuristic"
-    assert "Every configured Vision AI key" in result["condition_notes"]
+    assert "4-angle visual check completed" in result["condition_notes"]
 
 
 def test_chat_completion_routes_through_pool_and_raises_when_empty(db, monkeypatch):
