@@ -89,3 +89,4 @@ def test_email_templates_render_without_raising():
         )
         is False
     )
+
