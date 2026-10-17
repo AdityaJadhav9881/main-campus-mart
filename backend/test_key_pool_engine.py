@@ -492,3 +492,126 @@ def test_test_key_endpoint_accepts_raw_credentials(client, monkeypatch):
     assert body["provider"] == "cerebras"
     assert body["model"] == "llama-3.3-70b"
     assert "csk_raw_probe_key" not in response.text
+
+
+# =============================================================================
+# Zero-Config Auto-Discovery & Universal Execution Tests
+# =============================================================================
+def test_prefix_detection_rules():
+    assert key_pool_engine.detect_provider_from_key("AIzaSyB123456789") == (
+        "gemini",
+        "gemini-2.5-flash",
+    )
+    assert key_pool_engine.detect_provider_from_key("gsk_live_abcdef12345") == (
+        "groq",
+        "llama-3.3-70b-versatile",
+    )
+    assert key_pool_engine.detect_provider_from_key("sk-or-v1-abcdef12345") == (
+        "openrouter",
+        "google/gemini-2.0-flash-001",
+    )
+    assert key_pool_engine.detect_provider_from_key("sk-proj-abcdef12345") == (
+        "openai",
+        "gpt-4o-mini",
+    )
+    assert key_pool_engine.detect_provider_from_key("csk_cerebras_12345") == (
+        "cerebras",
+        "llama-3.3-70b",
+    )
+
+
+def test_auto_discovery_when_saving_key_without_provider(client, monkeypatch):
+    monkeypatch.setattr(
+        key_pool_engine,
+        "_probe_provider_model",
+        lambda prov, model, key, base: (True, "CampusMart AI online", 50, 200),
+    )
+    # Save a Groq key without specifying provider or model
+    resp = client.put(
+        "/admin/ai-config",
+        json={"ai_api_key": "gsk_auto_detect_0001"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ai_provider"] == "groq"
+    assert body["ai_model"] == "llama-3.3-70b-versatile"
+    assert body["has_api_key"] is True
+
+    # Save pool with only api_key in entries
+    resp_pool = client.put(
+        "/admin/ai-config",
+        json={
+            "keys_pool": [
+                {"api_key": "AIzaSyGeminiAuto01"},
+                {"api_key": "sk-or-v1-openrouterAuto02"},
+            ]
+        },
+    )
+    assert resp_pool.status_code == 200, resp_pool.text
+    pool_body = resp_pool.json()
+    assert len(pool_body["keys_pool"]) == 2
+    assert pool_body["keys_pool"][0]["provider"] == "gemini"
+    assert pool_body["keys_pool"][0]["model"] == "gemini-2.5-flash"
+    assert pool_body["keys_pool"][1]["provider"] == "openrouter"
+    assert pool_body["keys_pool"][1]["model"] == "google/gemini-2.0-flash-001"
+
+
+def test_test_and_discover_key_replaces_deprecated_model(db, monkeypatch):
+    probes: list[str] = []
+
+    def fake_probe(provider, model, key, base):
+        probes.append(model)
+        if model == "gemini-deprecated-1.0":
+            return (False, "HTTP 404: models/gemini-deprecated-1.0 not found", 120, 404)
+        return (True, "CampusMart AI online", 60, 200)
+
+    monkeypatch.setattr(key_pool_engine, "_probe_provider_model", fake_probe)
+    monkeypatch.setattr(
+        key_pool_engine,
+        "_discover_active_models",
+        lambda provider, key, base: ["gemini-2.5-flash", "gemini-1.5-flash"],
+    )
+
+    res = key_pool_engine.test_and_discover_key(
+        "AIzaSyOldKey",
+        db=db,
+        initial_model="gemini-deprecated-1.0",
+        provider="gemini",
+    )
+    assert res["ok"] is True
+    assert res["model"] == "gemini-2.5-flash"
+    assert res["discovered"] is True
+    assert probes == ["gemini-deprecated-1.0", "gemini-2.5-flash"]
+
+
+def test_ai_complete_execution_and_failover(db, monkeypatch):
+    key_pool_engine.save_key_pool(
+        db,
+        [
+            _entry("k1", "gemini", "gemini-2.5-flash", "AIzaRateLimitedKey"),
+            _entry("k2", "groq", "llama-3.3-70b-versatile", "gsk_HealthyKey"),
+        ],
+    )
+
+    attempted: list[str] = []
+
+    def fake_exec(key, prompt, norm_images, system_instruction, temperature, max_tokens, response_json):
+        attempted.append(key.id)
+        if key.id == "k1":
+            raise _FakeHTTPError(429)
+        return "Clean AI completed response text."
+
+    monkeypatch.setattr(key_pool_engine, "_execute_key_completion", fake_exec)
+
+    res = key_pool_engine.ai_complete(
+        "Analyze this product",
+        db=db,
+        task_type="chat",
+        system_instruction="You are CampusMart AI",
+    )
+    assert res == "Clean AI completed response text."
+    assert attempted == ["k1", "k2"]
+    health = key_pool_engine.health_snapshot()
+    assert health["k1"]["errors_count"] == 1
+    assert health["k2"]["calls_count"] == 1
+

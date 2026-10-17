@@ -47,6 +47,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from sqlalchemy.orm import Session
 
 from ..models import SystemConfig
@@ -75,13 +76,74 @@ PROVIDER_BASE_URLS: dict[str, str] = {
 }
 
 DEFAULT_MODELS: dict[str, str] = {
-    "gemini": "gemini-3.5-flash",
+    "gemini": "gemini-2.5-flash",
     "openai": "gpt-4o-mini",
-    "groq": "meta-llama/llama-4-scout-17b-16e-instruct",
-    "openrouter": "google/gemini-3.5-flash",
+    "groq": "llama-3.3-70b-versatile",
+    "openrouter": "google/gemini-2.0-flash-001",
     "mistral": "mistral-small-latest",
     "cerebras": "llama-3.3-70b",
 }
+
+PROVIDER_FALLBACK_MODELS: dict[str, tuple[str, ...]] = {
+    "gemini": (
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-pro",
+        "gemini-flash-latest",
+    ),
+    "groq": (
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+    ),
+    "openrouter": (
+        "google/gemini-2.0-flash-001",
+        "google/gemini-flash-1.5",
+        "meta-llama/llama-3.3-70b-instruct",
+        "openai/gpt-4o-mini",
+    ),
+    "openai": (
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-3.5-turbo",
+    ),
+    "mistral": (
+        "mistral-small-latest",
+        "mistral-medium-latest",
+        "open-mistral-7b",
+    ),
+    "cerebras": (
+        "llama-3.3-70b",
+        "llama3.1-8b",
+    ),
+}
+
+
+def detect_provider_from_key(api_key: str) -> tuple[str, str]:
+    """Auto-detect provider and working model from API key prefix.
+
+    - AIza...     -> gemini     (gemini-2.5-flash, fallback gemini-2.0-flash)
+    - gsk_...     -> groq       (llama-3.3-70b-versatile)
+    - sk-or-v1-.. -> openrouter (google/gemini-2.0-flash-001)
+    - sk-...      -> openai     (gpt-4o-mini)
+    - csk-...     -> cerebras   (llama-3.3-70b)
+    """
+    raw = (api_key or "").strip()
+    if raw.startswith("AIza"):
+        return ("gemini", "gemini-2.5-flash")
+    if raw.startswith("gsk_"):
+        return ("groq", "llama-3.3-70b-versatile")
+    if raw.startswith("sk-or-v1-") or raw.startswith("sk-or-"):
+        return ("openrouter", "google/gemini-2.0-flash-001")
+    if raw.startswith("sk-"):
+        return ("openai", "gpt-4o-mini")
+    if raw.startswith(("csk-", "csk_")):
+        return ("cerebras", "llama-3.3-70b")
+    if raw.startswith(("mk-", "mk_")):
+        return ("mistral", "mistral-small-latest")
+    return ("gemini", "gemini-2.5-flash")
 
 TASK_TYPES: tuple[str, ...] = ("vision", "chat", "search")
 ROUTING_MODES: tuple[str, ...] = ("smart_speed", "round_robin", "role_based")
@@ -156,16 +218,19 @@ def _legacy_pool(db: Session) -> list[PoolKey]:
     api_key = (rows.get("ai_api_key") or "").strip()
     if not api_key:
         return []
-    provider = (rows.get("ai_provider") or "gemini").strip().lower()
+    det_provider, det_model = detect_provider_from_key(api_key)
+    provider = (rows.get("ai_provider") or "").strip().lower()
     if provider not in PROVIDERS:
-        provider = "gemini"
-    model = (rows.get("ai_model") or DEFAULT_MODELS[provider]).strip()
+        provider = det_provider
+    model = (rows.get("ai_model") or "").strip()
+    if not model or model == "default":
+        model = det_model or DEFAULT_MODELS.get(provider, "gemini-2.5-flash")
     return [
         PoolKey(
             id="legacy-primary",
             label="Primary key (legacy config)",
             provider=provider,
-            model=model or DEFAULT_MODELS[provider],
+            model=model or DEFAULT_MODELS.get(provider, "gemini-2.5-flash"),
             api_key=api_key,
             base_url=(rows.get("ai_base_url") or "").strip(),
         )
@@ -208,13 +273,16 @@ def _slugify(value: str) -> str:
 
 
 def _entry_from_row(item: dict[str, Any]) -> PoolKey | None:
-    provider = str(item.get("provider") or "").strip().lower()
-    if provider not in PROVIDERS:
-        return None
     api_key = str(item.get("api_key") or "").strip()
     if not api_key:
         return None
-    model = str(item.get("model") or "").strip() or DEFAULT_MODELS[provider]
+    det_provider, det_model = detect_provider_from_key(api_key)
+    provider = str(item.get("provider") or "").strip().lower()
+    if provider not in PROVIDERS:
+        provider = det_provider
+    model = str(item.get("model") or "").strip()
+    if not model or model == "default":
+        model = det_model or DEFAULT_MODELS.get(provider, "gemini-2.5-flash")
     roles_raw = item.get("roles")
     roles: tuple[str, ...] = ()
     if isinstance(roles_raw, list):
@@ -256,18 +324,6 @@ def save_key_pool(db: Session, entries: list[dict[str, Any]]) -> list[PoolKey]:
     for index, item in enumerate(entries):
         if not isinstance(item, dict):
             raise ValueError(f"keys_pool[{index}] must be an object.")
-        provider = str(item.get("provider") or "").strip().lower()
-        if provider not in PROVIDERS:
-            raise ValueError(
-                f"keys_pool[{index}]: unsupported provider "
-                f"'{provider or '(missing)'}'."
-            )
-        model = str(item.get("model") or "").strip() or DEFAULT_MODELS[provider]
-        base_url = str(item.get("base_url") or "").strip()
-        if base_url and not base_url.lower().startswith(("http://", "https://")):
-            raise ValueError(
-                f"keys_pool[{index}]: base_url must be an http(s) URL."
-            )
 
         entry_id = str(item.get("id") or "").strip()
         inherited = existing.get(entry_id) if entry_id else None
@@ -280,6 +336,32 @@ def save_key_pool(db: Session, entries: list[dict[str, Any]]) -> list[PoolKey]:
         if not api_key:
             # Explicit empty string (or brand-new entry without one) -> skip.
             continue
+
+        raw_provider = str(item.get("provider") or "").strip().lower()
+        det_provider, det_model = detect_provider_from_key(api_key)
+        if raw_provider:
+            if raw_provider not in PROVIDERS:
+                raise ValueError(
+                    f"keys_pool[{index}]: unsupported provider "
+                    f"'{raw_provider or '(missing)'}'."
+                )
+            provider = raw_provider
+        else:
+            provider = inherited.provider if inherited else det_provider
+
+        model = str(item.get("model") or "").strip()
+        if not model or model == "default":
+            model = inherited.model if (inherited and inherited.model) else det_model
+        if not model:
+            model = DEFAULT_MODELS.get(provider, "gemini-2.5-flash")
+
+        base_url = str(item.get("base_url") or "").strip()
+        if not base_url and inherited:
+            base_url = inherited.base_url
+        if base_url and not base_url.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                f"keys_pool[{index}]: base_url must be an http(s) URL."
+            )
 
         if not entry_id:
             entry_id = _slugify(f"{provider}-{model}")
@@ -550,3 +632,547 @@ def pool_snapshot(db: Session) -> list[dict[str, Any]]:
         }
         for key in get_key_pool(db)
     ]
+
+
+# =============================================================================
+# Zero-Config Auto-Discovery & Universal Execution Wrapper
+# =============================================================================
+class _HTTPError(Exception):
+    """Internal lightweight HTTP exception carrying status_code."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(f"HTTP {status_code}: {message[:250]}")
+        self.status_code = status_code
+        self.response = type("Resp", (), {"status_code": status_code})()
+
+
+def _probe_provider_model(
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+) -> tuple[bool, str, int, int | None]:
+    """Test a key + model with a lightweight test prompt.
+
+    Returns: (success, text_or_error, latency_ms, http_status_code)
+    """
+    t0 = time.monotonic()
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            if provider == "gemini":
+                url = f"{base_url}/models/{model}:generateContent?key={api_key}"
+                resp = client.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "contents": [
+                            {
+                                "role": "user",
+                                "parts": [{"text": "Reply: CampusMart AI online"}],
+                            }
+                        ],
+                        "generationConfig": {
+                            "maxOutputTokens": 10,
+                            "temperature": 0.0,
+                        },
+                    },
+                )
+            else:
+                url = f"{base_url}/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                }
+                if provider == "openrouter":
+                    headers["HTTP-Referer"] = "https://campusmart.ai"
+                resp = client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "user", "content": "Reply: CampusMart AI online"}
+                        ],
+                        "max_tokens": 10,
+                        "temperature": 0.0,
+                    },
+                )
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if resp.status_code == 200:
+            data = resp.json()
+            if provider == "gemini":
+                candidates = data.get("candidates") or []
+                parts = (
+                    candidates[0].get("content", {}).get("parts", [])
+                    if candidates
+                    else []
+                )
+                text = (
+                    parts[0].get("text", "CampusMart AI online")
+                    if parts
+                    else "CampusMart AI online"
+                )
+            else:
+                choices = data.get("choices") or []
+                text = (
+                    choices[0].get("message", {}).get("content", "CampusMart AI online")
+                    if choices
+                    else "CampusMart AI online"
+                )
+            return (True, str(text).strip(), latency_ms, 200)
+        else:
+            err_msg = resp.text[:300]
+            return (
+                False,
+                f"HTTP {resp.status_code}: {err_msg}",
+                latency_ms,
+                resp.status_code,
+            )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        status = _http_status(exc)
+        return (False, f"{type(exc).__name__}: {exc}"[:300], latency_ms, status)
+
+
+def _discover_active_models(
+    provider: str,
+    api_key: str,
+    base_url: str,
+) -> list[str]:
+    """Query provider's live model directory API."""
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            if provider == "gemini":
+                url = f"{base_url}/models?key={api_key}"
+                resp = client.get(url, headers={"Content-Type": "application/json"})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models_list = data.get("models") or []
+                    valid: list[str] = []
+                    for m in models_list:
+                        methods = m.get("supportedGenerationMethods") or []
+                        if "generateContent" in methods:
+                            name = m.get("name", "").replace("models/", "")
+                            if name:
+                                valid.append(name)
+                    return valid
+            else:
+                url = f"{base_url}/models"
+                headers = {"Authorization": f"Bearer {api_key}"}
+                if provider == "openrouter":
+                    headers["HTTP-Referer"] = "https://campusmart.ai"
+                resp = client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    data_list = data.get("data") or []
+                    return [
+                        item.get("id")
+                        for item in data_list
+                        if isinstance(item, dict) and item.get("id")
+                    ]
+    except Exception as exc:
+        logger.warning("Model directory discovery failed for %s: %s", provider, exc)
+    return []
+
+
+def _select_best_model_from_candidates(
+    provider: str,
+    discovered_models: list[str],
+) -> str | None:
+    if not discovered_models:
+        return None
+    preferred = PROVIDER_FALLBACK_MODELS.get(provider, ())
+    for p in preferred:
+        if p in discovered_models:
+            return p
+    for p in preferred:
+        base_p = p.split("/")[-1]
+        for d in discovered_models:
+            if base_p in d:
+                return d
+    return discovered_models[0]
+
+
+def _update_db_model_config(
+    db: Session, raw_key: str, provider: str, new_model: str
+) -> None:
+    """Auto-update database config with newly discovered model."""
+    try:
+        m_row = db.get(SystemConfig, "ai_model")
+        k_row = db.get(SystemConfig, "ai_api_key")
+        if k_row and (k_row.value or "").strip() == raw_key:
+            if m_row:
+                m_row.value = new_model
+            else:
+                db.add(SystemConfig(key="ai_model", value=new_model))
+
+        pool_row = db.get(SystemConfig, POOL_CONFIG_KEY)
+        if pool_row and pool_row.value:
+            try:
+                entries = json.loads(pool_row.value)
+                if isinstance(entries, list):
+                    updated = False
+                    for item in entries:
+                        if isinstance(item, dict) and item.get("api_key") == raw_key:
+                            item["model"] = new_model
+                            updated = True
+                    if updated:
+                        pool_row.value = json.dumps(entries)
+            except Exception:
+                pass
+        db.commit()
+        logger.info(
+            "Updated DB config with discovered model '%s' for provider '%s'",
+            new_model,
+            provider,
+        )
+    except Exception as exc:
+        logger.warning("Could not persist discovered model update: %s", exc)
+
+
+def test_and_discover_key(
+    api_key: str,
+    *,
+    db: Session | None = None,
+    initial_model: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    """Dynamic model health check and auto-discovery.
+
+    1. Tests the key with auto-detected (or given) provider & model.
+    2. If 404 or deprecation occurs, queries GET .../models to discover active model.
+    3. Re-tests with discovered model.
+    4. If db is provided and a replacement was found, updates SystemConfig automatically.
+    """
+    raw_key = (api_key or "").strip()
+    if not raw_key:
+        return {
+            "ok": False,
+            "provider": "unknown",
+            "model": "unknown",
+            "error": "No API key provided",
+            "latency_ms": 0,
+            "discovered": False,
+        }
+
+    det_prov, det_model = detect_provider_from_key(raw_key)
+    prov = (provider or det_prov).strip().lower()
+    if prov not in PROVIDERS:
+        prov = det_prov
+    model = (
+        (initial_model or "").strip()
+        or det_model
+        or DEFAULT_MODELS.get(prov, "gemini-2.5-flash")
+    )
+    effective_base = (base_url or PROVIDER_BASE_URLS.get(prov, "")).rstrip("/")
+
+    ok, text_or_err, latency_ms, status = _probe_provider_model(
+        prov, model, raw_key, effective_base
+    )
+    if ok:
+        return {
+            "ok": True,
+            "provider": prov,
+            "model": model,
+            "preview": text_or_err,
+            "latency_ms": latency_ms,
+            "error": None,
+            "discovered": False,
+        }
+
+    is_model_error = (
+        status == 404
+        or (
+            status == 400
+            and (
+                "model" in text_or_err.lower()
+                or "not found" in text_or_err.lower()
+                or "deprecated" in text_or_err.lower()
+            )
+        )
+        or "not found" in text_or_err.lower()
+        or "deprecated" in text_or_err.lower()
+    )
+
+    if is_model_error:
+        logger.info(
+            "Model %s on %s failed (%s); discovering active replacements...",
+            model,
+            prov,
+            text_or_err,
+        )
+        discovered = _discover_active_models(prov, raw_key, effective_base)
+        best_model = _select_best_model_from_candidates(prov, discovered)
+        if best_model and best_model != model:
+            logger.info("Discovered replacement model: %s (was %s)", best_model, model)
+            ok_disc, text_disc, latency_disc, _ = _probe_provider_model(
+                prov, best_model, raw_key, effective_base
+            )
+            if ok_disc:
+                if db is not None:
+                    _update_db_model_config(db, raw_key, prov, best_model)
+                return {
+                    "ok": True,
+                    "provider": prov,
+                    "model": best_model,
+                    "preview": text_disc,
+                    "latency_ms": latency_disc,
+                    "error": None,
+                    "discovered": True,
+                }
+
+        for fallback_model in PROVIDER_FALLBACK_MODELS.get(prov, ()):
+            if fallback_model == model:
+                continue
+            ok_fb, text_fb, latency_fb, _ = _probe_provider_model(
+                prov, fallback_model, raw_key, effective_base
+            )
+            if ok_fb:
+                if db is not None:
+                    _update_db_model_config(db, raw_key, prov, fallback_model)
+                return {
+                    "ok": True,
+                    "provider": prov,
+                    "model": fallback_model,
+                    "preview": text_fb,
+                    "latency_ms": latency_fb,
+                    "error": None,
+                    "discovered": True,
+                }
+
+    return {
+        "ok": False,
+        "provider": prov,
+        "model": model,
+        "error": text_or_err,
+        "latency_ms": latency_ms,
+        "discovered": False,
+    }
+
+
+def _normalize_images_for_completion(
+    images: list[Any] | None,
+) -> list[dict[str, str]]:
+    """Normalize input images to uniform dictionaries with b64, mime, url."""
+    if not images:
+        return []
+    normalized: list[dict[str, str]] = []
+    for img in images:
+        if isinstance(img, dict):
+            b64 = img.get("b64") or ""
+            mime = img.get("mime") or "image/jpeg"
+            url = img.get("url") or ""
+            normalized.append({"b64": b64, "mime": mime, "url": url})
+        elif isinstance(img, str):
+            cleaned = img.strip()
+            if cleaned.startswith("data:"):
+                match = re.match(r"^data:([^;]+);base64,(.+)$", cleaned, re.DOTALL)
+                if match:
+                    normalized.append(
+                        {"mime": match.group(1), "b64": match.group(2), "url": ""}
+                    )
+                else:
+                    normalized.append(
+                        {"mime": "image/jpeg", "b64": cleaned, "url": ""}
+                    )
+            elif cleaned.startswith(("http://", "https://")):
+                normalized.append({"mime": "image/jpeg", "b64": "", "url": cleaned})
+            else:
+                normalized.append({"mime": "image/jpeg", "b64": cleaned, "url": ""})
+    return normalized
+
+
+def _execute_key_completion(
+    key: PoolKey,
+    prompt: str,
+    norm_images: list[dict[str, str]],
+    system_instruction: str | None,
+    temperature: float,
+    max_tokens: int | None,
+    response_json: bool,
+) -> str:
+    provider = key.provider
+    api_key = key.api_key
+    base_url = (key.base_url or PROVIDER_BASE_URLS.get(provider, "")).rstrip("/")
+
+    if provider == "gemini":
+        model = key.model or DEFAULT_MODELS["gemini"]
+        url = f"{base_url}/models/{model}:generateContent?key={api_key}"
+        parts: list[dict[str, Any]] = []
+        for img in norm_images:
+            if img.get("b64"):
+                parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": img.get("mime") or "image/jpeg",
+                            "data": img["b64"],
+                        }
+                    }
+                )
+        parts.append({"text": prompt})
+        body: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": temperature},
+        }
+        if system_instruction:
+            body["system_instruction"] = {"parts": [{"text": system_instruction}]}
+        if max_tokens:
+            body["generationConfig"]["maxOutputTokens"] = max_tokens
+        if response_json:
+            body["generationConfig"]["responseMimeType"] = "application/json"
+
+        with httpx.Client(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+            resp = client.post(
+                url, headers={"Content-Type": "application/json"}, json=body
+            )
+            if resp.status_code != 200:
+                raise _HTTPError(resp.status_code, resp.text)
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return parts[0].get("text", "") if parts else ""
+
+    # OpenAI-compatible providers (Groq, OpenRouter, OpenAI, Mistral, Cerebras)
+    model = key.model or DEFAULT_MODELS.get(provider, "gpt-4o-mini")
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = "https://campusmart.ai"
+
+    messages: list[dict[str, Any]] = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+
+    if norm_images:
+        content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in norm_images:
+            if img.get("b64"):
+                data_uri = (
+                    f"data:{img.get('mime') or 'image/jpeg'};base64,{img['b64']}"
+                )
+                content_parts.append(
+                    {"type": "image_url", "image_url": {"url": data_uri}}
+                )
+            elif img.get("url"):
+                content_parts.append(
+                    {"type": "image_url", "image_url": {"url": img["url"]}}
+                )
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        messages.append({"role": "user", "content": prompt})
+
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
+    if response_json:
+        body["response_format"] = {"type": "json_object"}
+
+    with httpx.Client(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+        resp = client.post(url, headers=headers, json=body)
+        if resp.status_code != 200:
+            raise _HTTPError(resp.status_code, resp.text)
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return choices[0].get("message", {}).get("content", "") or ""
+
+
+def ai_complete(
+    prompt: str,
+    *,
+    images: list[Any] | None = None,
+    system_instruction: str | None = None,
+    db: Session | None = None,
+    task_type: str = "chat",
+    temperature: float = 0.3,
+    max_tokens: int | None = None,
+    response_json: bool = False,
+) -> str:
+    """Universal Execution Wrapper for multi-key Zero-Config AI.
+
+    - Accepts prompt and optional 4-photo base64 images / URLs.
+    - Picks the healthiest active key from the pool.
+    - Formats payload correctly for provider (Gemini or Groq/OpenAI format).
+    - Automatically handles HTTP 429 rate limits by failing over to the next key.
+    - Returns clean text or JSON string.
+    """
+    if db is None:
+        try:
+            from ..database import SessionLocal
+
+            with SessionLocal() as session:
+                return ai_complete(
+                    prompt,
+                    images=images,
+                    system_instruction=system_instruction,
+                    db=session,
+                    task_type=task_type,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_json=response_json,
+                )
+        except Exception as exc:
+            logger.warning("ai_complete without db fallback error: %s", exc)
+
+    keys = select_ordered_keys(db, task_type) if db is not None else []
+    if not keys:
+        raise RuntimeError("No active AI key configured")
+
+    norm_images = _normalize_images_for_completion(images)
+    last_exc: Exception | None = None
+
+    for key in keys:
+        t0 = time.monotonic()
+        try:
+            result_text = _execute_key_completion(
+                key=key,
+                prompt=prompt,
+                norm_images=norm_images,
+                system_instruction=system_instruction,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_json=response_json,
+            )
+            latency_ms = (time.monotonic() - t0) * 1000
+            mark_success(key.id, latency_ms=latency_ms)
+            return result_text
+        except Exception as exc:
+            mark_failure(key.id, exc)
+            last_exc = exc
+            logger.warning(
+                "ai_complete: key %s (%s/%s) failed: %s; failing over to next key",
+                key.id,
+                key.provider,
+                key.model,
+                exc,
+            )
+
+    raise last_exc or RuntimeError("All AI keys in the pool failed")
+
+
+def execute_completion(
+    db: Session,
+    prompt: str,
+    role: str = "chat",
+    images: list[Any] | None = None,
+    system_instruction: str | None = None,
+) -> str:
+    """Compatibility alias for routers calling execute_completion."""
+    return ai_complete(
+        prompt,
+        images=images,
+        system_instruction=system_instruction,
+        db=db,
+        task_type=role or "chat",
+    )

@@ -1155,6 +1155,14 @@ async def update_ai_config(
     model = raw.get("ai_model") or current_cfg["ai_model"]
     api_key = raw.get("ai_api_key")  # None if omitted -> keeps stored key
 
+    # Auto-detect provider and working model from key prefix if omitted
+    if api_key:
+        det_prov, det_model = key_pool_engine.detect_provider_from_key(api_key)
+        if "ai_provider" not in raw or raw.get("ai_provider") not in vision_master.PROVIDERS:
+            provider = det_prov
+        if not raw.get("ai_model") or raw.get("ai_model") == "default":
+            model = det_model
+
     raw_base_url = raw.get("ai_base_url")
     if raw_base_url is not None:
         base_url_str = str(raw_base_url).strip()
@@ -1178,10 +1186,15 @@ async def update_ai_config(
                     k = item.get("api_key") or item.get("key") or ""
                     if k and item.get("enabled", True):
                         api_key = k
+                        det_p, det_m = key_pool_engine.detect_provider_from_key(k)
                         if "provider" in item and item["provider"] in vision_master.PROVIDERS:
                             provider = item["provider"]
-                        if "model" in item:
+                        else:
+                            provider = det_p
+                        if "model" in item and item["model"] != "default":
                             model = item["model"]
+                        else:
+                            model = det_m
                         break
 
     # Persist provider/model/key
@@ -1196,19 +1209,28 @@ async def update_ai_config(
     except Exception as exc:
         logger.warning("save_ai_config notice: %s", exc)
 
-    # Persist keys pool if provided
+    # Persist keys pool if provided with auto-detected provider/model
     if pool is not None and isinstance(pool, list):
         try:
             norm_pool = []
             for item in pool:
                 if isinstance(item, dict):
+                    k = item.get("api_key") or item.get("key") or ""
+                    item_prov = item.get("provider")
+                    item_model = item.get("model")
+                    if k:
+                        det_p, det_m = key_pool_engine.detect_provider_from_key(k)
+                        if not item_prov or item_prov not in vision_master.PROVIDERS:
+                            item_prov = det_p
+                        if not item_model or item_model == "default":
+                            item_model = det_m
                     norm_pool.append({
                         "id": str(item.get("id") or uuid.uuid4()),
-                        "provider": item.get("provider") or provider or "gemini",
-                        "model": item.get("model") or model or "gemini-2.5-flash",
-                        "api_key": item.get("api_key") or item.get("key") or "",
+                        "provider": item_prov or provider or "gemini",
+                        "model": item_model or model or key_pool_engine.DEFAULT_MODELS.get(item_prov or "gemini", "gemini-2.5-flash"),
+                        "api_key": k,
                         "base_url": item.get("base_url") or "",
-                        "label": item.get("label") or "Key",
+                        "label": item.get("label") or f"Key ({(item_prov or provider or 'ai')})",
                         "enabled": bool(item.get("enabled", True)),
                         "priority": int(item.get("priority", 1)),
                     })
@@ -1221,6 +1243,28 @@ async def update_ai_config(
             key_pool_engine.save_routing_mode(db, routing_mode)
         except Exception as exc:
             logger.warning("save_routing_mode notice: %s", exc)
+
+    # Dynamic model health check and auto-discovery on save (non-blocking)
+    if api_key:
+        try:
+            disc_res = key_pool_engine.test_and_discover_key(
+                api_key=api_key,
+                db=db,
+                initial_model=model,
+                provider=provider,
+                base_url=base_url,
+            )
+            if disc_res.get("discovered") and disc_res.get("model"):
+                model = disc_res["model"]
+                vision_master.save_ai_config(
+                    db,
+                    provider=provider,
+                    model=model,
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+        except Exception as exc:
+            logger.debug("Auto-discovery check on save notice: %s", exc)
 
     return _ai_config_read(db)
 
@@ -1237,9 +1281,9 @@ def test_ai_key(
     """Send a one-token completion through the requested key.
 
     Reference a stored pool entry by `id` (its key/model are used as stored)
-    or pass raw `provider` + `api_key` credentials. Reports latency + a short
-    preview on success, or the provider error verbatim on failure - the raw
-    key is never echoed back.
+    or pass raw `api_key` credentials (with auto-detected provider/model).
+    Reports latency + preview on success, or dynamically discovers active
+    replacement models if 404/deprecated.
     """
     entry = None
     if payload.id:
@@ -1257,23 +1301,29 @@ def test_ai_key(
                 detail=f"No pool key with id '{payload.id}'.",
             )
 
-    provider = (payload.provider or (entry.provider if entry else "")).lower()
-    if provider not in key_pool_engine.PROVIDERS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide a valid pool `id` or a `provider` to test.",
-        )
-    model = (
-        (payload.model or "").strip()
-        or (entry.model if entry else "")
-        or key_pool_engine.DEFAULT_MODELS[provider]
-    )
     api_key = (payload.api_key or "").strip() or (entry.api_key if entry else "")
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No API key to test: pass `api_key` or a stored pool `id`.",
         )
+
+    det_prov, det_model = key_pool_engine.detect_provider_from_key(api_key)
+    raw_prov = (payload.provider or (entry.provider if entry else "")).lower()
+    if raw_prov and raw_prov not in key_pool_engine.PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide a valid pool `id` or a supported `provider` to test.",
+        )
+    provider = raw_prov or det_prov
+
+    model = (
+        (payload.model or "").strip()
+        or (entry.model if entry else "")
+        or det_model
+        or key_pool_engine.DEFAULT_MODELS.get(provider, "gemini-2.5-flash")
+    )
+
     base_url = (payload.base_url or "").strip() or (
         entry.base_url if entry else ""
     )
@@ -1304,7 +1354,33 @@ def test_ai_key(
             preview=" ".join(text.split())[:160],
             active_keys_count=key_pool_engine.active_keys_count(db),
         )
-    except Exception as exc:  # noqa: BLE001 - report the provider error
+    except Exception as exc:  # noqa: BLE001 - report or auto-discover
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        err_str = str(exc).lower()
+        if status_code == 404 or "not found" in err_str or "deprecated" in err_str:
+            try:
+                res = key_pool_engine.test_and_discover_key(
+                    api_key=api_key,
+                    db=db,
+                    initial_model=model,
+                    provider=provider,
+                    base_url=base_url,
+                )
+                if res.get("ok"):
+                    latency_ms = res.get("latency_ms", int((time.monotonic() - started) * 1000))
+                    if entry is not None:
+                        key_pool_engine.mark_success(entry.id, latency_ms=latency_ms)
+                    return AiKeyTestResponse(
+                        ok=True,
+                        provider=res.get("provider", provider),
+                        model=res.get("model", model),
+                        latency_ms=latency_ms,
+                        preview=" ".join(str(res.get("preview", "")).split())[:160],
+                        active_keys_count=key_pool_engine.active_keys_count(db),
+                    )
+            except Exception:
+                pass
+
         latency_ms = int((time.monotonic() - started) * 1000)
         if entry is not None:
             key_pool_engine.mark_failure(entry.id, exc)

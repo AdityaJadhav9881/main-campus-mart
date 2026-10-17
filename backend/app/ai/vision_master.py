@@ -69,18 +69,18 @@ PROVIDERS: tuple[str, ...] = (
 )
 
 DEFAULT_PROVIDER = "gemini"
-# Latest GA Gemini Flash on the v1beta REST API. Never ship a model id Google
-# has not announced - an unknown id makes every vision call 404.
-DEFAULT_MODEL = "gemini-3.5-flash"
+# GA Gemini Flash on the v1beta REST API. Auto-selected by zero-config engine.
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 # Tried in order whenever the configured gemini model errors. First entry in
 # the effective chain is always the (normalized) configured model.
 GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-flash-latest",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-flash-latest",
 )
 
 # Model ids that look plausible but need normalization.
@@ -742,13 +742,21 @@ def _openai_text(payload: dict[str, Any]) -> str:
 
 
 GROQ_FALLBACK_MODELS: tuple[str, ...] = (
-    "meta-llama/llama-4-scout-17b-16e-instruct",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "mixtral-8x7b-32768",
 )
 OPENAI_FALLBACK_MODELS: tuple[str, ...] = (
     "gpt-4o-mini",
     "gpt-4o",
+    "gpt-3.5-turbo",
+)
+OPENROUTER_FALLBACK_MODELS: tuple[str, ...] = (
+    "google/gemini-2.0-flash-001",
+    "google/gemini-flash-1.5",
+    "meta-llama/llama-3.3-70b-instruct",
+    "openai/gpt-4o-mini",
 )
 
 
@@ -760,6 +768,10 @@ def _openai_compatible_models(provider: str, model: str) -> list[str]:
                 chain.append(fb)
     elif provider == "openai":
         for fb in OPENAI_FALLBACK_MODELS:
+            if fb not in chain:
+                chain.append(fb)
+    elif provider == "openrouter":
+        for fb in OPENROUTER_FALLBACK_MODELS:
             if fb not in chain:
                 chain.append(fb)
     return chain or [model]
