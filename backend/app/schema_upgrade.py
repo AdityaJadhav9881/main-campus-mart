@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 # (table, column, DDL type clause) — append new production columns here.
 _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "status", "VARCHAR(16) DEFAULT 'active'"),
+    ("users", "role", "VARCHAR(30) DEFAULT 'student'"),
     ("users", "password_hash", "VARCHAR(128)"),
     ("users", "phone", "VARCHAR(20)"),
     ("products", "trust_reason", "TEXT"),

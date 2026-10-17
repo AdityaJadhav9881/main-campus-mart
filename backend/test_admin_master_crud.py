@@ -521,3 +521,42 @@ def test_intervene_requires_admin_account(client):
         },
     )
     assert response.status_code == 409, response.text
+
+
+def test_database_wipe_all_endpoint(client):
+    admin = _register(client, "Super Admin", ADMIN_EMAIL)
+    second_admin = _register(client, "Master Admin", "adityajadhav0167@gmail.com")
+    student1 = _register(client, "Student One", "student1@example.com")
+    student2 = _register(client, "Student Two", "student2@example.com")
+
+    listing = _create_listing(client, student1["headers"], "Test Calculator", 500.0)
+    _chat(client, student2["headers"], listing["id"], student1["user"]["id"], "Is price negotiable?")
+
+    # Call wipe endpoint
+    response = client.post("/admin/database/wipe-all")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["deleted"]["products"] >= 1
+    assert body["deleted"]["chat_messages"] >= 1
+
+    preserved_emails = [a["email"].lower() for a in body["preserved_admins"]]
+    assert ADMIN_EMAIL.lower() in preserved_emails
+    assert "adityajadhav0167@gmail.com" in preserved_emails
+    assert "student1@example.com" not in preserved_emails
+    assert "student2@example.com" not in preserved_emails
+
+    # Verify listings and chats are empty
+    listings = client.get("/admin/listings").json()
+    assert len(listings) == 0
+
+    comms = client.get("/admin/communications").json()
+    assert comms["threads"] == []
+    assert comms["count"] == 0
+
+    # Non-super-admin rejection test
+    forbidden_resp = client.post(
+        "/admin/database/wipe-all",
+        headers=student1["headers"],
+    )
+    assert forbidden_resp.status_code == 403

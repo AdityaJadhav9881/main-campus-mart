@@ -128,6 +128,10 @@ class UserRead(BaseModel):
         default=None,
         description="DTE/CET Cell 4-digit institute code (e.g. '6006').",
     )
+    role: str = Field(
+        default="student",
+        description="Account authorization role: 'super_admin' | 'admin' | 'student'.",
+    )
     created_at: datetime
 
 
@@ -487,6 +491,7 @@ class AdminUserUpdate(BaseModel):
         description="Reputation override on the platform's 0.0-5.0 scale.",
     )
     status: Literal["active", "blocked"] | None = None
+    role: Literal["super_admin", "admin", "student"] | str | None = None
     new_password: str | None = Field(
         default=None,
         min_length=8,
@@ -1345,3 +1350,12 @@ class CallEventRequest(BaseModel):
     call_type: Literal["voice", "video"]
     status: Literal["completed", "missed", "declined"] = "completed"
     duration_seconds: int = Field(default=0, ge=0, le=86_400)
+
+
+class DatabaseWipeResponse(BaseModel):
+    """Result summary of a secure database wipe / hard reset."""
+
+    status: str = "success"
+    message: str
+    deleted: dict[str, int]
+    preserved_admins: list[dict[str, str]]

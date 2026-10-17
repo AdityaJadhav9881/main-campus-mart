@@ -124,6 +124,14 @@ class User(Base):
         server_default="'active'",
     )
 
+    # Authorization tier: 'super_admin' | 'admin' | 'student'
+    role = Column(
+        String(30),
+        nullable=False,
+        default="student",
+        server_default="'student'",
+    )
+
     # bcrypt hash for direct campus email/password auth alongside Firebase.
     # NULL for Firebase-only accounts; set by POST /auth/register or the
     # seed script (seed_db.py gives demo accounts a known password).

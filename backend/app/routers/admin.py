@@ -34,6 +34,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -49,7 +50,9 @@ from ..ai.orchestrator import (
     set_agent_enabled,
 )
 from ..auth import (
+    ADMIN_REQUIRE_AUTH,
     PROTECTED_ADMIN_EMAILS,
+    decode_token_optional,
     hash_password,
     is_super_admin,
     require_admin_access,
@@ -60,6 +63,7 @@ from ..models import (
     ActionOTP,
     AiChatMessage,
     AiChatSession,
+    CallSession,
     CartItem,
     ChatMessage,
     EmailOTP,
@@ -67,6 +71,7 @@ from ..models import (
     Product,
     Transaction,
     User,
+    WantedRequest,
 )
 from ..schemas import (
     AdminCommunicationsResponse,
@@ -88,6 +93,7 @@ from ..schemas import (
     AiKeyTestRequest,
     AiKeyTestResponse,
     ChatMessageRead,
+    DatabaseWipeResponse,
     ProductRead,
     TransactionRead,
     UserRead,
@@ -158,6 +164,7 @@ def _admin_user(user: User) -> UserRead:
         trust_score=user.trust_score,
         college_name=college_name,
         college_code=college_code,
+        role=getattr(user, "role", "student") or "student",
         created_at=user.created_at,
     )
 
@@ -1458,3 +1465,148 @@ def test_ai_key(
 # (reset_agent_flags is exported for the E2E harness; not exposed via HTTP to
 #  keep the admin contract exactly as specified.)
 _ = reset_agent_flags  # re-export marker for tests importing from this module
+
+
+# =============================================================================
+# Production Hard Reset / Database Wipe Endpoint
+# =============================================================================
+def wipe_all_operational_data(db: Session) -> dict[str, Any]:
+    """Wipe operational marketplace tables and test accounts, preserving all Admin accounts."""
+    counts = {
+        "chat_messages": db.query(ChatMessage).count(),
+        "call_sessions": db.query(CallSession).count(),
+        "transactions": db.query(Transaction).count(),
+        "cart_items": db.query(CartItem).count(),
+        "notifications": db.query(Notification).count(),
+        "wanted_requests": db.query(WantedRequest).count(),
+        "email_otps": db.query(EmailOTP).count(),
+        "action_otps": db.query(ActionOTP).count(),
+        "ai_chat_messages": db.query(AiChatMessage).count(),
+        "ai_chat_sessions": db.query(AiChatSession).count(),
+        "products": db.query(Product).count(),
+    }
+
+    # 1. Truncate/delete child tables first to respect foreign keys
+    db.query(ChatMessage).delete(synchronize_session=False)
+    db.query(CallSession).delete(synchronize_session=False)
+    db.query(CartItem).delete(synchronize_session=False)
+    db.query(Transaction).delete(synchronize_session=False)
+    db.query(AiChatMessage).delete(synchronize_session=False)
+    db.query(AiChatSession).delete(synchronize_session=False)
+    db.query(Notification).delete(synchronize_session=False)
+    db.query(WantedRequest).delete(synchronize_session=False)
+    db.query(EmailOTP).delete(synchronize_session=False)
+    db.query(ActionOTP).delete(synchronize_session=False)
+
+    # 2. Delete all products
+    db.query(Product).delete(synchronize_session=False)
+
+    # 3. Preserve Admin accounts and delete test student accounts
+    protected_emails = {
+        "martaicampus@gmail.com",
+        "admin@campusmart.in",
+        "adityajadhav0167@gmail.com",
+        "aditya.jadhav@campus.edu",
+    } | {e.lower() for e in PROTECTED_ADMIN_EMAILS}
+
+    # Ensure admin users have role set and stay active
+    for admin_user in (
+        db.query(User).filter(func.lower(User.email).in_(protected_emails)).all()
+    ):
+        if admin_user.email.lower() == "martaicampus@gmail.com":
+            admin_user.role = "super_admin"
+        else:
+            admin_user.role = "admin"
+        admin_user.status = "active"
+    db.flush()
+
+    # Query non-admin users to delete:
+    # WHERE role != 'admin' AND role != 'super_admin' AND email NOT IN (...)
+    non_admin_users = (
+        db.query(User)
+        .filter(
+            func.lower(User.email).notin_(protected_emails),
+            User.role.notin_(["admin", "super_admin"]),
+        )
+        .all()
+    )
+    deleted_user_count = len(non_admin_users)
+    for u in non_admin_users:
+        db.delete(u)
+
+    db.commit()
+
+    preserved = [
+        {"email": u.email, "name": u.name, "role": getattr(u, "role", "admin")}
+        for u in db.query(User).order_by(User.created_at.asc()).all()
+    ]
+    counts["users"] = deleted_user_count
+
+    logger.warning(
+        "DATABASE WIPE COMPLETE: %s records removed; %d admin accounts preserved: %s",
+        counts,
+        len(preserved),
+        ", ".join(a["email"] for a in preserved),
+    )
+
+    return {
+        "status": "success",
+        "message": "Database wiped successfully. All test marketplace and student data cleared; all Admin accounts preserved.",
+        "deleted": counts,
+        "preserved_admins": preserved,
+    }
+
+
+@router.post(
+    "/database/wipe-all",
+    response_model=DatabaseWipeResponse,
+    summary="Super Admin: hard reset operational tables while preserving all Admin accounts",
+)
+def wipe_database_endpoint(
+    request: Request,
+    claims: dict | None = Depends(require_admin_access),
+    db: Session = Depends(get_db),
+) -> DatabaseWipeResponse:
+    """Hard reset production before official launch.
+
+    Wipes all marketplace records from Neon PostgreSQL:
+      - chat_messages, call_sessions, transactions, cart_items,
+      - notifications, wanted_requests, email_otps, action_otps,
+      - ai_chat_messages, ai_chat_sessions, products.
+    Conditionally deletes users where:
+      role != 'admin' AND role != 'super_admin' AND email NOT IN ('martaicampus@gmail.com', 'admin@campusmart.in', 'adityajadhav0167@gmail.com', ...).
+    Strictly preserves all admin and super-admin accounts.
+    """
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else ""
+    token_claims = claims
+    if token and token_claims is None:
+        token_claims = decode_token_optional(token)
+        if token_claims is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired authentication token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    if token_claims is not None:
+        caller_email = (token_claims.get("email") or "").strip().lower()
+        if caller_email and not is_super_admin(caller_email):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Super Admin authorization required to wipe the database.",
+            )
+    elif ADMIN_REQUIRE_AUTH:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    result = wipe_all_operational_data(db)
+    return DatabaseWipeResponse(
+        status=result["status"],
+        message=result["message"],
+        deleted=result["deleted"],
+        preserved_admins=result["preserved_admins"],
+    )

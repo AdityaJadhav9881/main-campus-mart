@@ -136,6 +136,23 @@ def _decode_local_jwt(token: str) -> dict | None:
         return None
 
 
+def decode_token_optional(token: str | None) -> dict | None:
+    """Attempt to decode a token (local JWT or Firebase ID token) without raising exceptions.
+
+    Returns the claims dictionary if valid, or None if token is invalid/empty.
+    """
+    if not token:
+        return None
+    local_claims = _decode_local_jwt(token)
+    if local_claims is not None:
+        return local_claims
+    try:
+        firebase_admin.get_app()
+        return firebase_auth.verify_id_token(token)
+    except Exception:
+        return None
+
+
 # -----------------------------------------------------------------------------
 # Admin access control (Phase 7)
 # -----------------------------------------------------------------------------
@@ -277,7 +294,12 @@ def account_terminated() -> HTTPException:
 # the dashboard.
 SUPER_ADMIN_EMAIL = "martaicampus@gmail.com"
 PROTECTED_ADMIN_EMAILS: frozenset[str] = frozenset(
-    {"martaicampus@gmail.com", "aditya.jadhav@campus.edu"}
+    {
+        "martaicampus@gmail.com",
+        "admin@campusmart.in",
+        "adityajadhav0167@gmail.com",
+        "aditya.jadhav@campus.edu",
+    }
 )
 
 
