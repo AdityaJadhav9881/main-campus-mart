@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'providers/auth_provider.dart';
+import 'providers/cart_provider.dart';
 import 'providers/product_provider.dart';
 import 'providers/wishlist_provider.dart';
 import 'screens/ai_assistant_screen.dart';
@@ -14,9 +15,12 @@ import 'screens/feed_screen.dart';
 import 'screens/messages_screen.dart';
 import 'screens/profile_screen.dart';
 import 'services/api_service.dart';
+import 'services/notification_service.dart';
+import 'widgets/animated_brand_logo.dart';
 import 'widgets/app_theme.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const CampusMartApp());
 }
 
@@ -46,6 +50,13 @@ class CampusMartApp extends StatelessWidget {
           update: (_, auth, previous) =>
               (previous ?? ProductProvider(auth))..bindAuth(auth),
         ),
+        // Cart badge shared by the Discover header, product detail and the
+        // cart screen (Part B Task 7).
+        ChangeNotifierProxyProvider<AuthProvider, CartProvider>(
+          create: (context) => CartProvider(context.read<AuthProvider>()),
+          update: (_, auth, previous) =>
+              (previous ?? CartProvider(auth))..bindAuth(auth),
+        ),
       ],
       child: MaterialApp(
         title: 'Campus Mart Ai',
@@ -74,6 +85,7 @@ class _AuthGate extends StatefulWidget {
 class _AuthGateState extends State<_AuthGate> {
   Timer? _bootWarmupTimer;
   bool _bootWarmupVisible = false;
+  bool _notificationBridgeAttached = false;
 
   @override
   void initState() {
@@ -86,7 +98,17 @@ class _AuthGateState extends State<_AuthGate> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_notificationBridgeAttached) return;
+    _notificationBridgeAttached = true;
+    // Bell pump: starts polling /notifications/ on sign-in, stops on logout.
+    NotificationService.instance.bindAuth(context.read<AuthProvider>());
+  }
+
+  @override
   void dispose() {
+    NotificationService.instance.stop();
     _bootWarmupTimer?.cancel();
     super.dispose();
   }
@@ -225,7 +247,7 @@ class _AccessTerminatedGate extends StatelessWidget {
   }
 }
 
-/// Cold-boot card (>3s restore) - warm paper aesthetic.
+/// Cold-boot card (>3s restore) - animated brand mark + honest phase steps.
 class _BootWarmupCard extends StatelessWidget {
   const _BootWarmupCard();
 
@@ -239,15 +261,8 @@ class _BootWarmupCard extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 48,
-                height: 48,
-                child: CircularProgressIndicator(
-                  strokeWidth: 3.5,
-                  color: AppColors.royalBlue,
-                ),
-              ),
-              SizedBox(height: 24),
+              AnimatedBrandLogo(size: 108),
+              SizedBox(height: 26),
               Text(
                 'Connecting to Campus Mart Ai Marketplace',
                 textAlign: TextAlign.center,
@@ -258,7 +273,7 @@ class _BootWarmupCard extends StatelessWidget {
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              SizedBox(height: 10),
+              SizedBox(height: 8),
               Text(
                 'Hang tight! Waking up our cloud AI server (takes ~30-60 '
                 'seconds on first launch)...',
@@ -269,6 +284,8 @@ class _BootWarmupCard extends StatelessWidget {
                   height: 1.5,
                 ),
               ),
+              SizedBox(height: 18),
+              WarmupStepIndicator(),
             ],
           ),
         ),
@@ -293,6 +310,11 @@ class MainNavigationShell extends StatefulWidget {
 class _MainNavigationShellState extends State<MainNavigationShell> {
   int _index = 0;
 
+  /// Immersive browsing: while the student scrolls DOWN through the feed the
+  /// bottom nav slides off-screen (driven by FeedScreen), and it comes right
+  /// back on scroll-up or on any tab change.
+  bool _chromeVisible = true;
+
   /// Screens are built once so every tab keeps its own state while hidden
   /// (IndexedStack keeps offstage children alive).
   late final List<Widget> _screens;
@@ -301,7 +323,7 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
   void initState() {
     super.initState();
     _screens = <Widget>[
-      const FeedScreen(),
+      FeedScreen(onChromeVisibilityChanged: _setChromeVisible),
       // After a successful listing the shell jumps back to the feed tab.
       CreateListingScreen(onListingCreated: _showFeedTab),
       const AiAssistantScreen(),
@@ -310,7 +332,15 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
     ];
   }
 
-  void _showFeedTab() => setState(() => _index = 0);
+  void _showFeedTab() => setState(() {
+        _index = 0;
+        _chromeVisible = true;
+      });
+
+  void _setChromeVisible(bool visible) {
+    if (!mounted || _chromeVisible == visible) return;
+    setState(() => _chromeVisible = visible);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -319,36 +349,44 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
         index: _index,
         children: _screens,
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _index,
-        onTap: (index) => setState(() => _index = index),
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.explore_outlined),
-            activeIcon: Icon(Icons.explore),
-            label: 'Discover',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.add_box_outlined),
-            activeIcon: Icon(Icons.add_box),
-            label: 'Sell',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.auto_awesome_outlined),
-            activeIcon: Icon(Icons.auto_awesome),
-            label: 'Ask AI',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.chat_bubble_outline),
-            activeIcon: Icon(Icons.chat_bubble),
-            label: 'Messages',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.person_outline),
-            activeIcon: Icon(Icons.person),
-            label: 'Profile',
-          ),
-        ],
+      bottomNavigationBar: AnimatedSlide(
+        offset: _chromeVisible ? Offset.zero : const Offset(0, 1),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        child: BottomNavigationBar(
+          currentIndex: _index,
+          onTap: (index) => setState(() {
+            _index = index;
+            _chromeVisible = true;
+          }),
+          items: const [
+            BottomNavigationBarItem(
+              icon: Icon(Icons.explore_outlined),
+              activeIcon: Icon(Icons.explore),
+              label: 'Discover',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.add_box_outlined),
+              activeIcon: Icon(Icons.add_box),
+              label: 'Sell',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.auto_awesome_outlined),
+              activeIcon: Icon(Icons.auto_awesome),
+              label: 'Ask AI',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.chat_bubble_outline),
+              activeIcon: Icon(Icons.chat_bubble),
+              label: 'Messages',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.person_outline),
+              activeIcon: Icon(Icons.person),
+              label: 'Profile',
+            ),
+          ],
+        ),
       ),
     );
   }

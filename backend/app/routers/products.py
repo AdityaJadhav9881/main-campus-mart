@@ -49,7 +49,7 @@ from ..auth import (
 )
 from ..database import get_db
 from ..email_service import send_listing_published_email
-from ..models import Product, User
+from ..models import Notification, Product, User
 from ..schemas import (
     AnalyzeImagesRequest,
     AnalyzeImagesResponse,
@@ -225,6 +225,20 @@ def create_product(
     if payload.image_url and payload.image_url not in image_urls:
         image_urls.insert(0, payload.image_url)
 
+    # College network: the listing inherits the seller's campus (the client
+    # may override for club/society posts, but the default keeps "My College"
+    # filtering and same-college notifications honest).
+    college_name = (
+        (payload.college_name or "").strip()
+        or (seller.college_name or "").strip()
+        or None
+    )
+    college_code = (
+        (payload.college_code or "").strip()
+        or (seller.college_code or "").strip()
+        or None
+    )
+
     product = Product(
         seller_id=seller.id,       # FK: authenticated seller's profile row
         title=payload.title,
@@ -239,6 +253,8 @@ def create_product(
         # price_agent (or vision AI) output - replaces the old NULL default.
         suggested_price=suggested_price,
         listed_price=payload.listed_price,
+        college_name=college_name,
+        college_code=college_code,
         status=new_status,
         # Phase 7: persist the trust agent's exact reason when flagged so the
         # admin dashboard can show moderators WHY the listing was held.
@@ -252,6 +268,39 @@ def create_product(
     db.add(product)
     db.commit()
     db.refresh(product)
+
+    # College network trigger: alert every active student of the seller's
+    # campus ("🎓 New at COEP ..."). Only for live listings.
+    if college_name and new_status == "active":
+        classmates = (
+            db.query(User.id)
+            .filter(
+                User.college_name == college_name,
+                User.id != seller.id,
+                User.status == "active",
+            )
+            .all()
+        )
+        for (classmate_id,) in classmates:
+            db.add(
+                Notification(
+                    user_id=classmate_id,
+                    title=f"🎓 New at {college_name}",
+                    body=(
+                        f"{seller_name} listed '{product.title}' for "
+                        f"₹{product.listed_price:,.0f}"
+                    )[:500],
+                    type="college_listing",
+                    reference_id=str(product.id),
+                    is_read=False,
+                )
+            )
+        if classmates:
+            db.commit()
+            logger.info(
+                "College listing notifications: %s classmates of %s alerted",
+                len(classmates), college_name,
+            )
 
     product_snapshot = {
         "title": product.title,
@@ -342,6 +391,13 @@ def list_active_products(
         description="Exact category filter, case-insensitive "
                     "(e.g. 'Electronics').",
     ),
+    college: str | None = Query(
+        default=None,
+        max_length=255,
+        description="Exact college filter for the 'My College' Discover "
+                    "toggle, case-insensitive (e.g. 'COEP Technological "
+                    "University, Pune').",
+    ),
     db: Session = Depends(get_db),
 ) -> list[Product]:
     """Return products currently marked 'active', newest first.
@@ -353,6 +409,7 @@ def list_active_products(
     ai_tags / ai_condition_notes with case-insensitive substring semantics, so
     "bluetooth audio", "bose" or "music box" all surface a speaker the vision
     AI analysed. `?category=` applies the marketplace chip filter server-side.
+    `?college=` powers the college-network "🎓 My College" toggle.
     """
     query = db.query(Product)
     # Phase 4: eager-load the seller so `product.seller_trust_score` (the
@@ -365,6 +422,12 @@ def list_active_products(
         # user are escaped so "%"/"_" stay literal characters.
         query = query.filter(
             Product.category.ilike(_escape_like(category.strip()), escape="\\")
+        )
+
+    if college and college.strip():
+        # "My College" toggle: exact campus match (case-insensitive).
+        query = query.filter(
+            Product.college_name.ilike(_escape_like(college.strip()), escape="\\")
         )
 
     term = (q or "").strip()
@@ -381,6 +444,35 @@ def list_active_products(
         )
 
     return query.order_by(Product.created_at.desc()).all()
+
+
+@router.get(
+    "/{product_id}",
+    response_model=ProductRead,
+    summary="Get one listing",
+)
+def get_product(
+    product_id: UUID,
+    db: Session = Depends(get_db),
+) -> Product:
+    """Public single-listing lookup (bell-notification deep links).
+
+    Returns any listing regardless of status so a buyer who received an
+    order/college alert can still open the (possibly now-sold) product card;
+    the client renders the status badge from `product_status`/`status`.
+    """
+    product = (
+        db.query(Product)
+        .options(joinedload(Product.seller))
+        .filter(Product.id == product_id)
+        .first()
+    )
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found (it may have been removed).",
+        )
+    return product
 
 
 @router.delete(

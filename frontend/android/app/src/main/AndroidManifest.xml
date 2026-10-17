@@ -3,6 +3,10 @@
          hot reload only, so without it here the signed APK cannot reach the
          live API (Render), Cloudinary, or Firebase. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- In-app bell + heads-up alerts for college listings, orders, chat and
+         calls (Android 13+ asks the student at runtime). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
     <application
         android:label="CampusMart"
         android:name="${applicationName}"

@@ -23,6 +23,8 @@ class Product {
     this.trustReason,
     this.sellerTrustScore,
     this.sellerName,
+    this.collegeName,
+    this.collegeCode,
   });
 
   /// Builds a [Product] from the snake_case JSON produced by FastAPI.
@@ -49,6 +51,8 @@ class Product {
       trustReason: json['trust_reason']?.toString(),
       sellerTrustScore: _toDouble(json['seller_trust_score']),
       sellerName: json['seller_name']?.toString(),
+      collegeName: json['college_name']?.toString(),
+      collegeCode: json['college_code']?.toString(),
     );
   }
 
@@ -90,6 +94,22 @@ class Product {
   /// Seller's display name (null on payloads from older backends).
   final String? sellerName;
 
+  /// Campus this listing belongs to (seller's CET college at listing time).
+  final String? collegeName;
+
+  /// DTE/CET institute code of [collegeName] (e.g. '6006').
+  final String? collegeCode;
+
+  /// Short badge label for the college chip ("COEP" style) derived from the
+  /// full name: the first token(s) before a comma, capped at 18 chars.
+  String? get collegeBadge {
+    final name = collegeName?.trim() ?? '';
+    if (name.isEmpty) return null;
+    final head = name.split(',').first.trim();
+    if (head.isEmpty) return null;
+    return head.length <= 22 ? head : '${head.substring(0, 20)}…';
+  }
+
   /// Photos to show in the detail carousel/grid: the 4-angle gallery when the
   /// seller ran the vision scan, else just the front cover.
   List<String> get photos {
@@ -123,6 +143,8 @@ class Product {
         'created_at': createdAt.toIso8601String(),
         'seller_trust_score': sellerTrustScore,
         'seller_name': sellerName,
+        'college_name': collegeName,
+        'college_code': collegeCode,
       };
 
   /// Accepts num (int/double from JSON), numeric String, or null when reading

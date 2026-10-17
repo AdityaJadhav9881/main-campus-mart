@@ -39,3 +39,8 @@ os.environ["ADMIN_REQUIRE_AUTH"] = "false"
 # Brevo transactional emails (OTP / listing / sold) must NEVER hit the real
 # API from pytest - an empty key makes email_service skip the HTTP call.
 os.environ["BREVO_API_KEY"] = ""
+
+# College web-discovery (Wikipedia / Nominatim) is a keyless HTTP fallback in
+# GET /colleges; keep it OFF under pytest so the suite never opens a socket.
+# Discovery tests monkeypatch the module's HTTP helpers instead.
+os.environ["COLLEGE_WEB_DISCOVERY"] = "0"

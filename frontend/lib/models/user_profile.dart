@@ -10,6 +10,8 @@ class UserProfile {
     required this.trustScore,
     required this.createdAt,
     this.status = 'active',
+    this.collegeName,
+    this.collegeCode,
   });
 
   /// Builds a [UserProfile] from the snake_case JSON produced by FastAPI.
@@ -21,6 +23,8 @@ class UserProfile {
       email: json['email']?.toString() ?? '',
       trustScore: _toDouble(json['trust_score']) ?? 5.0,
       status: json['status']?.toString() ?? 'active',
+      collegeName: json['college_name']?.toString(),
+      collegeCode: json['college_code']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
     );
@@ -39,6 +43,21 @@ class UserProfile {
 
   final DateTime createdAt;
 
+  /// CET college the student belongs to (null for pre-college-network accounts).
+  final String? collegeName;
+
+  /// DTE/CET institute code of [collegeName] (e.g. '6006').
+  final String? collegeCode;
+
+  /// Short display label for the college chip ("COEP" style).
+  String? get collegeBadge {
+    final name = collegeName?.trim() ?? '';
+    if (name.isEmpty) return null;
+    final head = name.split(',').first.trim();
+    if (head.isEmpty) return null;
+    return head.length <= 26 ? head : '${head.substring(0, 24)}…';
+  }
+
   /// Serializes back to the API's snake_case contract.
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,
@@ -47,6 +66,8 @@ class UserProfile {
         'email': email,
         'trust_score': trustScore,
         'status': status,
+        'college_name': collegeName,
+        'college_code': collegeCode,
         'created_at': createdAt.toIso8601String(),
       };
 

@@ -74,7 +74,7 @@ class AuthProvider extends ChangeNotifier {
         await _refreshFromServer();
       }
     } catch (error) {
-      _errorMessage = 'Session restore failed: $error';
+      _errorMessage = 'We could not restore your session. Please sign in again.';
     } finally {
       _isRestoring = false;
       notifyListeners();
@@ -93,7 +93,7 @@ class AuthProvider extends ChangeNotifier {
       // Keep the cached profile; surface the cause for the retry UI.
       _errorMessage = error.message;
     } catch (error) {
-      _errorMessage = 'Could not refresh profile: $error';
+      _errorMessage = 'We could not refresh your profile right now. Please retry in a moment.';
     }
   }
 
@@ -112,7 +112,7 @@ class AuthProvider extends ChangeNotifier {
       _errorMessage = error.message;
       return false;
     } catch (error) {
-      _errorMessage = 'Login failed: $error';
+      _errorMessage = 'We could not sign you in right now. Check your connection and try again.';
       return false;
     } finally {
       _isLoading = false;
@@ -124,6 +124,8 @@ class AuthProvider extends ChangeNotifier {
     required String name,
     required String email,
     required String password,
+    String? collegeName,
+    String? collegeCode,
   }) async {
     _isLoading = true;
     _errorMessage = null;
@@ -133,6 +135,8 @@ class AuthProvider extends ChangeNotifier {
         name: name,
         email: email,
         password: password,
+        collegeName: collegeName,
+        collegeCode: collegeCode,
       );
       await _adoptSession(session);
       return true;
@@ -140,7 +144,7 @@ class AuthProvider extends ChangeNotifier {
       _errorMessage = error.message;
       return false;
     } catch (error) {
-      _errorMessage = 'Registration failed: $error';
+      _errorMessage = 'We could not create your account right now. Check your connection and try again.';
       return false;
     } finally {
       _isLoading = false;
@@ -153,24 +157,36 @@ class AuthProvider extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   /// Step 1 - park the signup and have the 6-digit code emailed.
+  ///
+  /// [collegeName]/[collegeCode] are the CET college picked in the required
+  /// Sign Up sheet (Task 3); they ride along so the new profile starts
+  /// pre-linked to its campus network.
   Future<bool> sendOtp({
     required String name,
     required String email,
     required String password,
+    String? collegeName,
+    String? collegeCode,
   }) async {
     _isLoading = true;
     _errorMessage = null;
     _fallbackOtp = null;
     notifyListeners();
     try {
-      final res = await _api.sendOtp(name: name, email: email, password: password);
+      final res = await _api.sendOtp(
+        name: name,
+        email: email,
+        password: password,
+        collegeName: collegeName,
+        collegeCode: collegeCode,
+      );
       _fallbackOtp = res['fallback_otp_code'] as String?;
       return true;
     } on ApiException catch (error) {
       _errorMessage = error.message;
       return false;
     } catch (error) {
-      _errorMessage = 'Could not send the code: $error';
+      _errorMessage = 'We could not send your verification code right now. Please try again.';
       return false;
     } finally {
       _isLoading = false;
@@ -195,7 +211,7 @@ class AuthProvider extends ChangeNotifier {
       _errorMessage = error.message;
       return false;
     } catch (error) {
-      _errorMessage = 'Verification failed: $error';
+      _errorMessage = 'We could not verify that code right now. Please try again.';
       return false;
     } finally {
       _isLoading = false;
@@ -216,7 +232,41 @@ class AuthProvider extends ChangeNotifier {
       notifyListeners();
       return false;
     } catch (error) {
-      _errorMessage = 'Could not resend the code: $error';
+      _errorMessage = 'We could not resend the code right now. Please try again.';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // College network (Task 3) - Profile tab editor
+  // ---------------------------------------------------------------------------
+
+  /// Repoint this student's campus network after a Profile-tab college swap.
+  /// The next listing they publish inherits the new college.
+  Future<bool> updateCollege({
+    required String collegeName,
+    String? collegeCode,
+  }) async {
+    if (_token.isEmpty) return false;
+    _errorMessage = null;
+    try {
+      final updated = await _api.updateMyCollege(
+        token: _token,
+        collegeName: collegeName,
+        collegeCode: collegeCode,
+      );
+      _profile = updated;
+      await _persistProfile(updated);
+      notifyListeners();
+      return true;
+    } on ApiException catch (error) {
+      _errorMessage = error.message;
+      notifyListeners();
+      return false;
+    } catch (error) {
+      _errorMessage =
+          'We could not update your college right now. Please try again.';
       notifyListeners();
       return false;
     }

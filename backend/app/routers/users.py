@@ -1,26 +1,33 @@
 """
 routers/users.py
 ================
-User profile endpoints (Phase 2, Task 3).
+User profile endpoints (Phase 2, Task 3 + college network).
 
-    POST /users/                   (protected) - create profile right after a
+    POST  /users/                  (protected) - create profile right after a
                                     student registers on the mobile app.
-    GET  /users/{firebase_uid}     (public)    - fetch profile + trust score.
+    GET   /users/{firebase_uid}    (public)    - fetch profile + trust score.
+    PATCH /users/me                (protected) - update the caller's own
+                                    profile (college picker in the Profile tab).
 
 SECURITY MODEL
     On creation the `firebase_uid` is ALWAYS taken from the *verified* ID
     token - never from the request body - so no student can create or claim a
-    profile belonging to someone else. The body only carries display data
-    (name, email).
+    profile belonging to someone else. PATCH /users/me only ever edits the
+    caller's own row (same verified-identity rule).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 from sqlalchemy.orm import Session
 
-from ..auth import account_terminated, extract_uid, verify_firebase_token
+from ..auth import (
+    account_terminated,
+    extract_uid,
+    get_or_create_current_user,
+    verify_firebase_token,
+)
 from ..database import get_db
 from ..models import User
-from ..schemas import UserCreate, UserRead
+from ..schemas import UserCollegeUpdate, UserCreate, UserRead
 
 # Prefix + path "/" below combine to the spec path "POST /users/".
 router = APIRouter(prefix="/users", tags=["users"])
@@ -64,6 +71,34 @@ def create_user(
     db.add(user)
     db.commit()          # explicit commit (autocommit=False in database.py)
     db.refresh(user)     # reload server-generated id + created_at defaults
+    return user
+
+
+@router.patch(
+    "/me",
+    response_model=UserRead,
+    summary="Update my profile (college network)",
+)
+def update_my_profile(
+    payload: UserCollegeUpdate,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> User:
+    """Update the CALLER's own profile.
+
+    Currently used by the Profile tab's college editor: the student picks a
+    different CET college (or types a custom one) and their listings inherit
+    it from the next publish onward. Only the caller's row is ever touched.
+    """
+    user = get_or_create_current_user(db, token)
+
+    if payload.college_name is not None:
+        user.college_name = payload.college_name.strip() or None
+    if payload.college_code is not None:
+        user.college_code = payload.college_code.strip() or None
+
+    db.commit()
+    db.refresh(user)
     return user
 
 

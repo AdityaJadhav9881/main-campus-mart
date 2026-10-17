@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 import '../models/ai_analysis.dart';
 import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
-import '../services/ai_price_estimate.dart';
 import '../services/api_service.dart';
 import '../services/currency.dart';
 import '../widgets/app_theme.dart';
@@ -22,7 +21,6 @@ import '../widgets/app_theme.dart';
 ///     /products/analyze-images auto-fills title, description, condition and
 ///     price (fields the student has not typed yet), plus AI tags + 4-angle
 ///     condition notes for the listing.
-///   * A live "✨ AI Smart Estimate" banner mirrors the backend price agent.
 ///   * The submit button sits well above the bottom navigation bar so
 ///     floating snackbars never cover it.
 class CreateListingScreen extends StatefulWidget {
@@ -551,14 +549,6 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
               _buildPhotoGrid(),
               const SizedBox(height: 12),
               _buildScanStatus(),
-              if (_photosComplete && _analysis != null) ...[
-                const SizedBox(height: 16),
-                _AiEstimateBanner(
-                  title: _titleController.text,
-                  condition: _condition,
-                  age: _ageController.text,
-                ),
-              ],
               const SizedBox(height: 20),
               TextFormField(
                 controller: _titleController,
@@ -1062,114 +1052,6 @@ class _SlotPlaceholder extends StatelessWidget {
       ],
     );
   }
-}
-
-/// Live "✨ AI Smart Estimate" preview banner.
-///
-/// Re-uses [AiPriceEstimate], the client mirror of the backend price agent,
-/// so the range students see updates as they type the title, age and pick a
-/// condition - before anything is submitted. All figures are in INR.
-class _AiEstimateBanner extends StatelessWidget {
-  const _AiEstimateBanner({
-    required this.title,
-    required this.condition,
-    required this.age,
-  });
-
-  final String title;
-  final String condition;
-  final String age;
-
-  @override
-  Widget build(BuildContext context) {
-    final range = AiPriceEstimate.range(
-      title: title,
-      condition: condition,
-      age: age,
-    );
-    final factor = AiPriceEstimate.factorFor(condition);
-    final hasInput = title.trim().isNotEmpty || age.trim().isNotEmpty;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeOut,
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.royalBlue.withOpacity(hasInput ? 0.10 : 0.05),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.royalBlue.withOpacity(0.35)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.auto_awesome, size: 14, color: AppColors.royalBlue),
-              SizedBox(width: 6),
-              Text(
-                'AI Smart Estimate',
-                style: TextStyle(
-                  color: AppColors.royalBlue,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.4,
-                ),
-              ),
-              Spacer(),
-              Text(
-                'LIVE',
-                style: TextStyle(
-                  color: AppColors.textMuted,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.0,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text.rich(
-            TextSpan(
-              children: [
-                const TextSpan(
-                  text: 'Estimated fair price  ',
-                  style: TextStyle(
-                    color: AppColors.textMuted,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                TextSpan(
-                  text: '${formatInr(range.low)} – ${formatInr(range.high)}',
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            hasInput
-                ? 'Condition "${_pretty(condition)}" x${factor.toStringAsFixed(2)} '
-                    '· age & category applied · AI confirms the exact value on submit.'
-                : 'Enter title, age and condition to see the range the AI will start from.',
-            style: const TextStyle(
-              color: AppColors.textMuted,
-              fontSize: 11.5,
-              height: 1.4,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String _pretty(String condition) =>
-      condition.isEmpty ? condition : condition[0].toUpperCase() + condition.substring(1);
 }
 
 /// Spinning, softly pulsing loader with the AI status copy required by spec.

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
@@ -10,6 +12,7 @@ import '../providers/product_provider.dart';
 import '../services/api_service.dart';
 import '../services/currency.dart';
 import '../widgets/app_theme.dart';
+import 'in_app_call_screen.dart';
 import 'product_detail_screen.dart';
 
 /// One buyer-seller conversation on a product listing.
@@ -112,21 +115,108 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _isSending) return;
+    _input.clear();
+    await _postMessage(text: text);
+  }
+
+  /// Camera/gallery picker -> upload the photo -> send it on the thread
+  /// (with the composer text as optional caption, WhatsApp style).
+  Future<void> _pickPhoto() async {
+    if (_isSending) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_camera_outlined,
+                color: AppColors.royalBlue,
+              ),
+              title: const Text(
+                'Take a photo',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              onTap: () => Navigator.pop(sheetContext, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_library_outlined,
+                color: AppColors.royalBlue,
+              ),
+              title: const Text(
+                'Choose from gallery',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              onTap: () => Navigator.pop(sheetContext, ImageSource.gallery),
+            ),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 1600,
+        imageQuality: 85,
+      );
+      if (picked == null || !mounted) return;
+      final bytes = await picked.readAsBytes();
+      if (!mounted) return;
+      final caption = _input.text.trim();
+      _input.clear();
+      await _postMessage(
+        text: caption,
+        photoBytes: bytes,
+        photoName: picked.name,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open your photos: $error')),
+      );
+    }
+  }
+
+  /// Single send path for text and/or photo messages.
+  Future<void> _postMessage({
+    required String text,
+    Uint8List? photoBytes,
+    String photoName = 'chat_photo.jpg',
+  }) async {
+    if (_isSending) return;
+    if (text.isEmpty && photoBytes == null) return;
+
     final auth = context.read<AuthProvider>();
     final myId = auth.profile?.id ?? '';
+    final pendingId = 'pending-${DateTime.now().microsecondsSinceEpoch}';
 
     setState(() {
       _isSending = true;
-      _input.clear();
       // Optimistic bubble so the send feels instant.
       _messages = <ChatMessage>[
         ..._messages,
         ChatMessage(
-          id: 'pending-${DateTime.now().microsecondsSinceEpoch}',
+          id: pendingId,
           productId: widget.productId,
           senderId: myId,
           receiverId: widget.otherUserId,
-          message: text,
+          message: text.isNotEmpty ? text : 'Uploading photo...',
           createdAt: DateTime.now(),
         ),
       ];
@@ -134,48 +224,48 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     _scrollToBottom();
 
     try {
+      String? uploadedUrl;
+      if (photoBytes != null) {
+        uploadedUrl = await _api.uploadListingImage(
+          bytes: photoBytes,
+          filename: photoName,
+          token: auth.token,
+        );
+      }
       final created = await _api.sendMessage(
         productId: widget.productId,
         receiverId: widget.otherUserId,
         message: text,
+        imageUrl: uploadedUrl,
         token: auth.token,
       );
       if (!mounted) return;
       setState(() {
         _messages = <ChatMessage>[
           for (final message in _messages)
-            if (message.id.startsWith('pending-') && message.message == text)
-              created
-            else
-              message,
+            if (message.id == pendingId) created else message,
         ];
         _isSending = false;
       });
     } on ApiException catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _messages = _messages
-            .where((message) => !message.id.startsWith('pending-'))
-            .toList();
-        _isSending = false;
-      });
-      _input.text = text;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Message not sent: ${error.message}')),
-      );
+      _handleSendFailure(pendingId, text, error.message);
     } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _messages = _messages
-            .where((message) => !message.id.startsWith('pending-'))
-            .toList();
-        _isSending = false;
-      });
-      _input.text = text;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Message not sent: $error')),
-      );
+      _handleSendFailure(pendingId, text, '$error');
     }
+  }
+
+  void _handleSendFailure(String pendingId, String text, String reason) {
+    if (!mounted) return;
+    setState(() {
+      _messages = _messages
+          .where((message) => message.id != pendingId)
+          .toList();
+      _isSending = false;
+    });
+    if (text.isNotEmpty) _input.text = text;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Message not sent: $reason')),
+    );
   }
 
   void _scrollToBottom() {
@@ -206,6 +296,37 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
     );
   }
 
+  /// Opens the in-app call screen (Task 6); on hang-up the outcome is logged
+  /// via POST /chats/call-event so both sides see the call bubble.
+  Future<void> _startCall({required bool video}) async {
+    final outcome = await Navigator.of(context).push<CallOutcome>(
+      MaterialPageRoute<CallOutcome>(
+        builder: (_) => InAppCallScreen(
+          receiverName: widget.otherUserName,
+          initialVideo: video,
+        ),
+      ),
+    );
+    if (outcome == null || !mounted) return;
+    try {
+      final created = await _api.recordCallEvent(
+        productId: widget.productId,
+        receiverId: widget.otherUserId,
+        callType: outcome.callType,
+        status: outcome.status,
+        durationSeconds: outcome.durationSeconds,
+        token: context.read<AuthProvider>().token,
+      );
+      if (!mounted) return;
+      setState(() {
+        _messages = <ChatMessage>[..._messages, created];
+      });
+      _scrollToBottom();
+    } catch (_) {
+      // The call itself is done; failing to log it must not interrupt chat.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -230,6 +351,19 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
             ),
           ],
         ),
+        actions: [
+          // Task 6: in-app voice/video calls from the thread itself.
+          IconButton(
+            tooltip: 'Voice call',
+            icon: const Icon(Icons.call_outlined, size: 20),
+            onPressed: () => _startCall(video: false),
+          ),
+          IconButton(
+            tooltip: 'Video call',
+            icon: const Icon(Icons.videocam_outlined, size: 21),
+            onPressed: () => _startCall(video: true),
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -241,7 +375,12 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
           ),
           const Divider(),
           Expanded(child: _buildThread()),
-          _Composer(controller: _input, onSend: _send, enabled: !_isSending),
+          _Composer(
+            controller: _input,
+            onSend: _send,
+            onPickPhoto: _pickPhoto,
+            enabled: !_isSending,
+          ),
         ],
       ),
     );
@@ -449,14 +588,66 @@ class _MessageBubble extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(
-                  message.message,
-                  style: TextStyle(
-                    color: pending ? AppColors.textMuted : AppColors.textPrimary,
-                    fontSize: 14,
-                    height: 1.35,
+                if (message.imageUrl != null) ...[
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        fullscreenDialog: true,
+                        builder: (_) =>
+                            _ChatPhotoViewer(url: message.imageUrl!),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.network(
+                        message.imageUrl!,
+                        width: 210,
+                        height: 160,
+                        fit: BoxFit.cover,
+                        loadingBuilder: (context, child, progress) =>
+                            progress == null
+                                ? child
+                                : Container(
+                                    width: 210,
+                                    height: 160,
+                                    color: AppColors.surfaceHigh,
+                                    child: const Center(
+                                      child: SizedBox(
+                                        width: 22,
+                                        height: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2.2,
+                                          color: AppColors.cyanAccent,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                        errorBuilder: (context, error, stack) => Container(
+                          width: 210,
+                          height: 160,
+                          color: AppColors.surfaceHigh,
+                          child: const Icon(
+                            Icons.broken_image_outlined,
+                            size: 34,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
+                  if (message.message.trim().isNotEmpty)
+                    const SizedBox(height: 6),
+                ],
+                if (message.message.trim().isNotEmpty)
+                  Text(
+                    message.message,
+                    style: TextStyle(
+                      color:
+                          pending ? AppColors.textMuted : AppColors.textPrimary,
+                      fontSize: 14,
+                      height: 1.35,
+                    ),
+                  ),
                 const SizedBox(height: 3),
                 Text(
                   pending ? 'Sending...' : time,
@@ -475,16 +666,18 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-/// Message composer strip: text field + cyan send button.
+/// Message composer strip: photo button + text field + cyan send button.
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
     required this.onSend,
+    required this.onPickPhoto,
     required this.enabled,
   });
 
   final TextEditingController controller;
   final VoidCallback onSend;
+  final VoidCallback onPickPhoto;
   final bool enabled;
 
   @override
@@ -492,9 +685,31 @@ class _Composer extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        padding: const EdgeInsets.fromLTRB(12, 8, 16, 12),
         child: Row(
           children: [
+            Material(
+              color: AppColors.surfaceHigh,
+              shape: const CircleBorder(),
+              child: Tooltip(
+                message: 'Send a photo',
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: enabled ? onPickPhoto : null,
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Icon(
+                      Icons.add_a_photo_outlined,
+                      size: 19,
+                      color: enabled
+                          ? AppColors.cyanAccent
+                          : AppColors.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
             Expanded(
               child: TextField(
                 controller: controller,
@@ -528,6 +743,55 @@ class _Composer extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Fullscreen black photo viewer opened by tapping a chat photo bubble.
+class _ChatPhotoViewer extends StatelessWidget {
+  const _ChatPhotoViewer({required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.close, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          minScale: 1.0,
+          maxScale: 4.0,
+          child: Image.network(
+            url,
+            fit: BoxFit.contain,
+            loadingBuilder: (context, child, progress) {
+              if (progress == null) return child;
+              return const Center(
+                child: CircularProgressIndicator(
+                  color: Colors.white70,
+                  strokeWidth: 2.5,
+                ),
+              );
+            },
+            errorBuilder: (context, error, stack) => const Center(
+              child: Icon(
+                Icons.broken_image_outlined,
+                size: 56,
+                color: Colors.white38,
+              ),
+            ),
+          ),
         ),
       ),
     );

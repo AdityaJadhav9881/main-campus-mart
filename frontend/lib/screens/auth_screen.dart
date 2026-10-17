@@ -4,8 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../models/college.dart';
 import '../providers/auth_provider.dart';
+import '../widgets/animated_brand_logo.dart';
 import '../widgets/app_theme.dart';
+import '../widgets/college_picker_sheet.dart';
 
 /// Full-screen Login / Sign-Up for campus email-password auth (Phase 7).
 ///
@@ -40,6 +43,11 @@ class _AuthScreenState extends State<AuthScreen> {
 
   bool _isLoginMode = true;
   bool _obscurePassword = true;
+
+  /// Required CET college pick (Sign Up) - links the student to their campus
+  /// network so they receive same-college listing alerts.
+  College? _selectedCollege;
+  String? _collegeError;
 
   /// Step 2 (code entry) only exists while signing up.
   _SignupStep _signupStep = _SignupStep.details;
@@ -131,11 +139,26 @@ class _AuthScreenState extends State<AuthScreen> {
       );
       _stopWarmup();
     } else {
+      // College network: every student picks their CET college up front.
+      final college = _selectedCollege;
+      if (college == null) {
+        setState(() =>
+            _collegeError = 'Pick your college to join its campus network');
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Select your college to continue.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
       // Step 1: park the signup and email the code (Brevo).
       ok = await auth.sendOtp(
         name: _nameController.text.trim(),
         email: _emailController.text.trim(),
         password: _passwordController.text,
+        collegeName: college.name,
+        collegeCode: college.code,
       );
       if (!mounted) return;
       if (ok) {
@@ -327,6 +350,8 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                       child: const Column(
                         children: [
+                          AnimatedBrandLogo(size: 72),
+                          SizedBox(height: 14),
                           Text(
                             'Connecting to Campus Mart Ai Marketplace',
                             textAlign: TextAlign.center,
@@ -336,17 +361,8 @@ class _AuthScreenState extends State<AuthScreen> {
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          SizedBox(height: 6),
-                          Text(
-                            'Hang tight! Waking up our cloud AI server '
-                            '(takes ~30-60 seconds on first launch)...',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: AppColors.textMuted,
-                              fontSize: 12,
-                              height: 1.4,
-                            ),
-                          ),
+                          SizedBox(height: 12),
+                          WarmupStepIndicator(),
                         ],
                       ),
                     ),
@@ -466,8 +482,120 @@ class _AuthScreenState extends State<AuthScreen> {
               return null;
             },
           ),
+          // College network: required CET college pick while signing up.
+          if (!_isLoginMode) ...[
+            const SizedBox(height: 14),
+            _buildCollegeSelector(),
+          ],
         ],
       ),
+    );
+  }
+
+  /// Tappable college field for Sign Up - opens the CET picker sheet and
+  /// shows the picked institute (name + CET code badge) or the required hint.
+  Widget _buildCollegeSelector() {
+    final college = _selectedCollege;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () async {
+            final picked =
+                await showCollegePickerSheet(context, initial: college);
+            if (picked == null || !mounted) return;
+            setState(() {
+              _selectedCollege = picked;
+              _collegeError = null;
+            });
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: _collegeError != null
+                    ? AppColors.danger.withOpacity(0.6)
+                    : college != null
+                        ? AppColors.royalBlue.withOpacity(0.45)
+                        : AppColors.hairline,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.school_outlined,
+                  size: 20,
+                  color: college != null
+                      ? AppColors.royalBlue
+                      : AppColors.textMuted,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        college == null
+                            ? 'Select your college (required)'
+                            : college.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: college == null
+                              ? AppColors.textMuted
+                              : AppColors.textPrimary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                          height: 1.25,
+                        ),
+                      ),
+                      if (college != null) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          [
+                            if (college.code.isNotEmpty)
+                              'CET ${college.code}',
+                            if (college.city.isNotEmpty) college.city,
+                          ].join(' · '),
+                          style: const TextStyle(
+                            color: AppColors.textMuted,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  college == null
+                      ? Icons.chevron_right
+                      : Icons.swap_horiz_rounded,
+                  size: 20,
+                  color: college == null
+                      ? AppColors.textMuted
+                      : AppColors.royalBlue,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_collegeError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 6, 0, 0),
+            child: Text(
+              _collegeError!,
+              style: const TextStyle(
+                color: AppColors.danger,
+                fontSize: 12,
+              ),
+            ),
+          ),
+      ],
     );
   }
 

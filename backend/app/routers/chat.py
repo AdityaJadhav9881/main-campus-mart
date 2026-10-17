@@ -1,12 +1,18 @@
 """
 routers/chat.py
 ===============
-Buyer-Seller messaging + the "Ask CampusMart AI" student assistant (Task 5).
+Buyer-Seller messaging + the "Ask CampusMart AI" student assistant (Task 5)
+plus saved AI conversations, call logs, and chat notifications.
 
     POST /chats/messages                                 - send one message
     GET  /chats/conversations                            - inbox threads
     GET  /chats/messages/{product_id}/{other_user_id}    - full thread history
+    POST /chats/call-event                               - voice/video call log
     POST /ai/chat                                        - assistant replies
+    GET  /ai/sessions                                    - saved conversations
+    POST /ai/sessions                                    - create a session
+    GET  /ai/sessions/{session_id}                       - full transcript
+    DELETE /ai/sessions/{session_id}                     - delete a conversation
 
 Design notes
 ------------
@@ -23,8 +29,14 @@ Design notes
   REAL campus items. When no LLM API key is configured - or the provider
   fails - a deterministic local catalog assistant answers instead (source:
   'catalog'), so the tab always replies.
+* Every AI turn is persisted to AiChatSession/AiChatMessage so the Gemini-
+  style history drawer can replay conversations; new sessions get a smart
+  4-word title derived from the first prompt.
+* Sending a message (or finishing a call) creates a Notification for the
+  receiver, which the Flutter bell icon polls.
 """
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -37,10 +49,21 @@ from sqlalchemy.orm import Session, joinedload
 from ..ai import vision_master
 from ..auth import extract_uid, get_or_create_current_user, verify_firebase_token
 from ..database import get_db
-from ..models import ChatMessage, Product, User
+from ..models import (
+    AiChatMessage,
+    AiChatSession,
+    ChatMessage,
+    Notification,
+    Product,
+    User,
+)
 from ..schemas import (
     AiChatRequest,
     AiChatResponse,
+    AiSessionDetail,
+    AiSessionMessageRead,
+    AiSessionRead,
+    CallEventRequest,
     ChatMessageCreate,
     ChatMessageRead,
     ConversationRead,
@@ -71,9 +94,34 @@ def _serialize(message: ChatMessage) -> ChatMessageRead:
         sender_id=message.sender_id,
         receiver_id=message.receiver_id,
         message=message.message,
+        image_url=message.image_url,
         created_at=message.created_at,
         is_read=message.read_at is not None,
     )
+
+
+def _notify(
+    db: Session,
+    user_id: UUID,
+    title: str,
+    body: str,
+    type_: str,
+    reference_id: str | None = None,
+) -> None:
+    """Create one bell-icon notification (never blocks the calling request)."""
+    try:
+        db.add(
+            Notification(
+                user_id=user_id,
+                title=title[:200],
+                body=body[:500],
+                type=type_,
+                reference_id=reference_id,
+                is_read=False,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - notifications are best-effort
+        logger.warning("notification insert failed (%s): %s", type_, exc)
 
 
 # =============================================================================
@@ -117,20 +165,35 @@ def send_message(
             detail="Recipient not found.",
         )
 
+    image_url = (payload.image_url or "").strip() or None
     message = ChatMessage(
         product_id=product.id,
         sender_id=sender.id,
         receiver_id=receiver.id,
         message=payload.message.strip(),
+        image_url=image_url,
     )
     db.add(message)
+
+    # A4: mirror the message into the receiver's bell-icon feed.
+    preview = message.message.strip()[:80] or "Sent a photo"
+    _notify(
+        db,
+        receiver.id,
+        f"💬 New message from {sender.name}",
+        f"{preview} · re: {product.title}",
+        "chat_message",
+        reference_id=str(sender.id),
+    )
+
     db.commit()
     db.refresh(message)
     logger.info(
-        "Chat: %s -> %s on '%s'",
+        "Chat: %s -> %s on '%s'%s",
         sender.email,
         receiver.email,
         product.title,
+        " (photo)" if image_url else "",
     )
     return _serialize(message)
 
@@ -195,7 +258,11 @@ def list_conversations(
                     photos[0] if photos else (product.image_url or None)
                 ),
                 product_price=product.listed_price,
-                last_message=last.message,
+                last_message=(
+                    last.message
+                    if last.message.strip()
+                    else ("[Photo]" if last.image_url else "[Message]")
+                ),
                 last_message_at=last.created_at,
                 last_message_is_mine=last.sender_id == me.id,
                 unread_count=unread.get((product_id, other_id), 0),
@@ -262,6 +329,295 @@ def list_thread_messages(
 
 
 # =============================================================================
+# Voice / video call events (in-app call screen logs)
+# =============================================================================
+def _format_call_duration(seconds: int) -> str:
+    """'1m 24s' / '45s' / '<1m' style label for the call bubble."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s" if seconds > 0 else "<1m"
+    minutes, remainder = divmod(seconds, 60)
+    return f"{minutes}m {remainder}s" if remainder else f"{minutes}m"
+
+
+@router.post(
+    "/call-event",
+    response_model=ChatMessageRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Log a finished voice/video call into the product thread",
+)
+def record_call_event(
+    payload: CallEventRequest,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> ChatMessageRead:
+    """Persist the outcome of an in-app call as a thread bubble.
+
+    Called by the Flutter call screen when the call ends. Produces a normal
+    ChatMessage ("📞 Voice call · 1m 24s") plus a Notification for the
+    receiver, so missed calls surface on the bell icon too.
+    """
+    caller = _current_user(db, token)
+
+    product = db.query(Product).filter(Product.id == payload.product_id).first()
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found (it may have been removed).",
+        )
+
+    if payload.receiver_id == caller.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot log a call with yourself.",
+        )
+
+    receiver = db.query(User).filter(User.id == payload.receiver_id).first()
+    if receiver is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recipient not found.",
+        )
+
+    icon = "📞 Voice call" if payload.call_type == "voice" else "📹 Video call"
+    if payload.status == "completed":
+        label = f"{icon} · {_format_call_duration(payload.duration_seconds)}"
+    elif payload.status == "missed":
+        label = f"{icon} · Missed"
+    else:
+        label = f"{icon} · Declined"
+
+    message = ChatMessage(
+        product_id=product.id,
+        sender_id=caller.id,
+        receiver_id=receiver.id,
+        message=label,
+        image_url=None,
+    )
+    db.add(message)
+
+    if payload.status == "completed":
+        title = f"{icon} with {caller.name}"
+    else:
+        title = f"Missed {payload.call_type} call from {caller.name}"
+    _notify(
+        db,
+        receiver.id,
+        title,
+        f"{label} · re: {product.title}",
+        "call",
+        reference_id=str(caller.id),
+    )
+
+    db.commit()
+    db.refresh(message)
+    logger.info(
+        "Call event: %s -> %s (%s, %ss) on '%s'",
+        caller.email, receiver.email, payload.status,
+        payload.duration_seconds, product.title,
+    )
+    return _serialize(message)
+
+
+# =============================================================================
+# Ask CampusMart AI assistant - saved sessions (history drawer)
+# =============================================================================
+# Filler words ignored when deriving a 4-word session title.
+_TITLE_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "can", "could", "you", "me",
+    "my", "i", "what", "which", "how", "do", "does", "did", "please", "tell",
+    "about", "for", "of", "to", "in", "on", "it", "this", "that", "give",
+    "show", "find", "help", "with", "and", "or", "am", "be",
+}
+
+
+def _derive_session_title(text: str) -> str:
+    """Smart 4-word title from the student's first prompt."""
+    words = [w for w in re.split(r"\s+", (text or "").strip()) if w]
+    picked: list[str] = []
+    for index, word in enumerate(words):
+        # Skip filler words only while the title is still empty.
+        if not picked and word.lower().strip("?!.,") in _TITLE_STOPWORDS and index < len(words) - 1:
+            continue
+        picked.append(word)
+        if len(picked) >= 4:
+            break
+    if not picked:
+        return "New chat"
+    title = " ".join(picked).strip("?!.,")[:60]
+    if not title:
+        return "New chat"
+    return title[0].upper() + title[1:]
+
+
+def _session_read(session: AiChatSession) -> AiSessionRead:
+    messages = list(session.messages or [])
+    last = messages[-1] if messages else None
+    return AiSessionRead(
+        id=session.id,
+        title=session.title,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        message_count=len(messages),
+        last_message=(last.content.strip()[:120] or ("[Photo]" if last.image_url else None)) if last else None,
+    )
+
+
+@ai_router.get(
+    "/sessions",
+    response_model=list[AiSessionRead],
+    summary="My saved AI conversations (newest first)",
+)
+def list_ai_sessions(
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> list[AiSessionRead]:
+    """History drawer payload: sessions grouped client-side by date."""
+    me = _current_user(db, token)
+    rows = (
+        db.query(AiChatSession)
+        .filter(AiChatSession.user_id == me.id)
+        .order_by(AiChatSession.updated_at.desc())
+        .limit(60)
+        .all()
+    )
+    return [_session_read(session) for session in rows]
+
+
+@ai_router.post(
+    "/sessions",
+    response_model=AiSessionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a fresh AI conversation",
+)
+def create_ai_session(
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> AiSessionRead:
+    """Create an empty session ("New chat"); the first /ai/chat call retitles it."""
+    me = _current_user(db, token)
+    session = AiChatSession(user_id=me.id, title="New chat")
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return _session_read(session)
+
+
+@ai_router.get(
+    "/sessions/{session_id}",
+    response_model=AiSessionDetail,
+    summary="Full transcript of one saved AI conversation",
+)
+def get_ai_session(
+    session_id: UUID,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> AiSessionDetail:
+    """Replay a conversation (owner only; others get 404)."""
+    me = _current_user(db, token)
+    session = (
+        db.query(AiChatSession)
+        .filter(AiChatSession.id == session_id, AiChatSession.user_id == me.id)
+        .first()
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found.",
+        )
+
+    messages = [
+        AiSessionMessageRead(
+            id=message.id,
+            role=message.role,
+            content=message.content,
+            image_url=message.image_url,
+            matched_product_ids=[
+                UUID(pid)
+                for pid in _load_product_ids(message.matched_products_json)
+            ],
+            created_at=message.created_at,
+        )
+        for message in session.messages
+    ]
+    base = _session_read(session)
+    return AiSessionDetail(**base.model_dump(), messages=messages)
+
+
+@ai_router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a saved AI conversation",
+)
+def delete_ai_session(
+    session_id: UUID,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> None:
+    """Owner-only hard delete (messages cascade)."""
+    me = _current_user(db, token)
+    session = (
+        db.query(AiChatSession)
+        .filter(AiChatSession.id == session_id, AiChatSession.user_id == me.id)
+        .first()
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found.",
+        )
+    db.delete(session)
+    db.commit()
+    return None
+
+
+def _load_product_ids(raw: str | None) -> list[str]:
+    """Parse the matched-products JSON blob safely (never raises)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if item]
+
+
+def _persist_ai_turn(
+    db: Session,
+    session: AiChatSession,
+    user_message: str,
+    image_url: str | None,
+    reply: str,
+    recommended_ids: list[UUID],
+) -> None:
+    """Append the user prompt + assistant reply to the session, retitle if new."""
+    if session.title in ("", "New chat") and (user_message.strip() or image_url):
+        session.title = _derive_session_title(user_message or "Photo inspection")
+
+    db.add(
+        AiChatMessage(
+            session_id=session.id,
+            role="user",
+            content=user_message.strip(),
+            image_url=image_url,
+        )
+    )
+    db.add(
+        AiChatMessage(
+            session_id=session.id,
+            role="assistant",
+            content=reply.strip(),
+            image_url=None,
+            matched_products_json=json.dumps([str(pid) for pid in recommended_ids]),
+        )
+    )
+    session.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+# =============================================================================
 # Ask CampusMart AI assistant
 # =============================================================================
 def _catalog_lines(db: Session) -> tuple[str, list[Product]]:
@@ -286,15 +642,25 @@ def _catalog_lines(db: Session) -> tuple[str, list[Product]]:
     return "\n".join(lines), products
 
 
-_ASSISTANT_SYSTEM = """You are "CampusMart AI", the helpful shopping assistant \
-inside Campus Mart Ai - a second-hand marketplace for Indian college students.
+_ASSISTANT_SYSTEM = """You are "CampusMart AI", the friendly all-round companion \
+inside Campus Mart Ai - a second-hand marketplace app for Indian college students.
+
+You are a GENERAL assistant: answer ANY question the student asks - academics, \
+hostel life, gadgets, study tips, comparisons, recommendations, general knowledge - \
+not just marketplace questions. Be warm, upbeat and genuinely helpful.
 
 Rules:
   * Prices are ALWAYS Indian Rupees (₹). Never use $ or USD.
   * Be concise and friendly (2-5 sentences unless the student asks for detail).
-  * Recommend ONLY from the LIVE LISTINGS below when asked for items; quote the \
-exact ₹ price and mention why it is a good deal. If nothing matches, say so and \
-suggest what to search for instead.
+  * If the student attaches a PHOTO, inspect it carefully: identify the item, \
+brand/model if visible, judge its condition from the image, and give an honest \
+fair resale price in ₹ for the Indian campus market (compare with the item's \
+current Indian retail price - a working used unit is usually worth 55-85% of \
+retail, and never quote a tiny fraction of retail for a functional item). Also \
+suggest a tempting marketplace title if they want to sell it.
+  * When asked for items to buy, recommend ONLY from the LIVE LISTINGS below; \
+quote the exact ₹ price and mention why it is a good deal. If nothing matches, \
+say so and suggest what to search for instead.
   * For "is this price fair?" questions, compare against typical Indian campus \
 second-hand prices (pen ₹10-50, used textbook ₹250-450, calculator ₹300-900, \
 headphones ₹500-3,000, used Bluetooth speaker ₹4,000-7,500, laptop ₹12,000-45,000).
@@ -493,7 +859,29 @@ def ai_chat(
     and ₹ prices. Falls back to a local catalogue assistant when no key is
     configured or the provider errors - the tab never leaves students hanging.
     """
-    _current_user(db, token)  # profile required; blocked users already 403'd
+    me = _current_user(db, token)  # profile required; blocked users already 403'd
+
+    # --- Resolve or create the saved session (history drawer) ----------------
+    session: AiChatSession | None = None
+    if payload.session_id is not None:
+        session = (
+            db.query(AiChatSession)
+            .filter(
+                AiChatSession.id == payload.session_id,
+                AiChatSession.user_id == me.id,
+            )
+            .first()
+        )
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat session not found.",
+            )
+    if session is None:
+        session = AiChatSession(user_id=me.id, title="New chat")
+        db.add(session)
+        db.commit()
+        db.refresh(session)
 
     catalog, products = _catalog_lines(db)
     system = _ASSISTANT_SYSTEM.format(catalog=catalog or "(no active listings yet)")
@@ -501,19 +889,59 @@ def ai_chat(
         {"role": turn.role, "content": turn.content} for turn in payload.history
     ]
 
+    # Photo-only prompts get a default instruction so the model always has
+    # text to act on (providers reject empty text parts).
+    user_message = payload.message.strip()
+    if not user_message and payload.image_url:
+        user_message = (
+            "I attached a photo - inspect it and tell me what it is, its "
+            "condition, and a fair resale price in ₹."
+        )
+
     try:
         reply = vision_master.chat_completion(
             db,
             system=system,
             history=history,
-            user_message=payload.message,
+            user_message=user_message,
+            image_url=payload.image_url,
         )
+        reply = reply.strip()
+        ids = _recommended_ids(reply, products)
+        _persist_ai_turn(db, session, payload.message, payload.image_url, reply, ids)
         return AiChatResponse(
-            reply=reply.strip(),
+            reply=reply,
             source="llm",
-            recommended_product_ids=_recommended_ids(reply, products),
+            recommended_product_ids=ids,
+            session_id=session.id,
+            session_title=session.title,
         )
     except Exception as exc:  # noqa: BLE001 - upstream/outage -> local assistant
         logger.warning("AI chat LLM unavailable (%s); catalog assistant answers", exc)
+        if payload.image_url and not payload.message.strip():
+            fallback_reply = (
+                "I received your photo! The online Vision AI is waking up "
+                "right now, so I could not inspect it this second - ask me "
+                "again in a moment for a full look (brand, condition, fair "
+                "₹ price). Meanwhile, anything else I can help with?"
+            )
+            _persist_ai_turn(
+                db, session, payload.message, payload.image_url,
+                fallback_reply, [],
+            )
+            return AiChatResponse(
+                reply=fallback_reply,
+                source="catalog",
+                recommended_product_ids=[],
+                session_id=session.id,
+                session_title=session.title,
+            )
         reply, ids = _local_catalog_reply(payload.message, products)
-        return AiChatResponse(reply=reply, source="catalog", recommended_product_ids=ids)
+        _persist_ai_turn(db, session, payload.message, payload.image_url, reply, ids)
+        return AiChatResponse(
+            reply=reply,
+            source="catalog",
+            recommended_product_ids=ids,
+            session_id=session.id,
+            session_title=session.title,
+        )

@@ -11,8 +11,9 @@ Live Admin Master Control endpoints for the React Admin Dashboard (Phase 7).
     DELETE /admin/listings/{product_id}      - delete + trust penalty (-0.8, floor 0.0)
     GET  /admin/ai-agents                    - runtime agent flags
     PATCH /admin/ai-agents/{agent_key}       - toggle an agent on/off
-    GET  /admin/ai-config                    - Vision-AI provider/model/key (masked)
+    GET  /admin/ai-config                    - Vision-AI config + key pool (masked)
     PUT  /admin/ai-config                    - update them live (no redeploy)
+    POST /admin/ai-config/test-key           - live probe of one key
 
 Auth: OPTIONAL by default so the standalone React dashboard (which calls
 /admin/* straight from the browser with no student Bearer JWT) works
@@ -22,6 +23,7 @@ See app/auth.require_admin_access for the enforcement logic.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -29,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from ..ai import vision_master
+from ..ai import key_pool_engine, vision_master
 from ..ai.orchestrator import (
     AGENT_KEYS,
     get_agent_flags,
@@ -46,6 +48,8 @@ from ..schemas import (
     AgentFlagUpdate,
     AiConfigRead,
     AiConfigUpdate,
+    AiKeyTestRequest,
+    AiKeyTestResponse,
     UserRead,
 )
 
@@ -77,6 +81,8 @@ def _admin_listing(product: Product) -> AdminListingRead:
         listed_price=product.listed_price,
         status=product.status,
         trust_reason=product.trust_reason,
+        college_name=product.college_name,
+        college_code=product.college_code,
         created_at=product.created_at,
         seller_name=product.seller.name if product.seller else None,
         seller_email=product.seller.email if product.seller else None,
@@ -307,10 +313,10 @@ def update_agent_flag(agent_key: str, payload: AgentFlagUpdate) -> dict:
 
 
 # =============================================================================
-# Vision-AI provider control plane (Task 2)
+# Vision-AI provider control plane (Task 2 + key pool engine)
 # =============================================================================
 def _ai_config_read(db: Session) -> AiConfigRead:
-    """Build the masked GET response (never leaks the raw key)."""
+    """Build the masked GET response (never leaks the raw keys)."""
     config = vision_master.get_ai_config(db)
     key = config["ai_api_key"]
     return AiConfigRead(
@@ -319,6 +325,9 @@ def _ai_config_read(db: Session) -> AiConfigRead:
         ai_base_url=config["ai_base_url"] or None,
         has_api_key=bool(key),
         masked_key=vision_master.mask_key(key),
+        keys_pool=key_pool_engine.pool_snapshot(db),  # type: ignore[arg-type]
+        routing_mode=key_pool_engine.get_routing_mode(db),  # type: ignore[arg-type]
+        active_keys_count=key_pool_engine.active_keys_count(db),
     )
 
 
@@ -332,7 +341,8 @@ def get_ai_config(db: Session = Depends(get_db)) -> AiConfigRead:
 
     `has_api_key` tells the dashboard whether the Sell flow's 4-photo scan is
     running full vision analysis or the INR heuristic fallback; `masked_key`
-    shows only `sk-...abcd` so screens can be shared safely.
+    shows only `sk-...abcd` so screens can be shared safely. `keys_pool`
+    exposes every pooled key (masked) with live health + `routing_mode`.
     """
     return _ai_config_read(db)
 
@@ -346,11 +356,15 @@ def update_ai_config(
     payload: AiConfigUpdate,
     db: Session = Depends(get_db),
 ) -> AiConfigRead:
-    """Persist provider/model/key/base_url to PostgreSQL and apply at once.
+    """Persist provider settings / the multi-key pool and apply at once.
 
     The very next POST /products/analyze-images (and POST /ai/chat) uses the
-    new provider - no redeploy, no restart. `ai_api_key: null` keeps the
-    stored key; an empty string clears it.
+    new configuration - no redeploy, no restart.
+      * Legacy fields: `ai_api_key: null` keeps the stored key; an empty
+        string clears it. `ai_provider` present => single-key config saved.
+      * `keys_pool` (optional) replaces the whole multi-key pool; entries
+        without an `api_key` inherit the stored key with the same `id`.
+      * `routing_mode` (optional) switches the engine live.
     """
     base_url = (payload.ai_base_url or "").strip()
     if base_url and not base_url.lower().startswith(("http://", "https://")):
@@ -358,20 +372,142 @@ def update_ai_config(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ai_base_url must be an http(s) URL.",
         )
-    try:
-        vision_master.save_ai_config(
-            db,
-            provider=payload.ai_provider,
-            model=payload.ai_model,
-            api_key=payload.ai_api_key,
-            base_url=base_url,
+
+    if payload.ai_provider is not None:
+        try:
+            vision_master.save_ai_config(
+                db,
+                provider=payload.ai_provider,
+                model=payload.ai_model
+                or key_pool_engine.DEFAULT_MODELS[payload.ai_provider],
+                api_key=payload.ai_api_key,
+                base_url=base_url,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    if payload.keys_pool is not None:
+        try:
+            key_pool_engine.save_key_pool(
+                db,
+                [
+                    entry.model_dump(exclude_none=True)
+                    for entry in payload.keys_pool
+                ],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    if payload.routing_mode is not None:
+        try:
+            key_pool_engine.save_routing_mode(db, payload.routing_mode)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    return _ai_config_read(db)
+
+
+@router.post(
+    "/ai-config/test-key",
+    response_model=AiKeyTestResponse,
+    summary="Live-probe one pooled (or raw) AI key",
+)
+def test_ai_key(
+    payload: AiKeyTestRequest,
+    db: Session = Depends(get_db),
+) -> AiKeyTestResponse:
+    """Send a one-token completion through the requested key.
+
+    Reference a stored pool entry by `id` (its key/model are used as stored)
+    or pass raw `provider` + `api_key` credentials. Reports latency + a short
+    preview on success, or the provider error verbatim on failure - the raw
+    key is never echoed back.
+    """
+    entry = None
+    if payload.id:
+        entry = next(
+            (
+                key
+                for key in key_pool_engine.get_key_pool(db)
+                if key.id == payload.id
+            ),
+            None,
         )
-    except ValueError as exc:
+        if entry is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No pool key with id '{payload.id}'.",
+            )
+
+    provider = (payload.provider or (entry.provider if entry else "")).lower()
+    if provider not in key_pool_engine.PROVIDERS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    return _ai_config_read(db)
+            detail="Provide a valid pool `id` or a `provider` to test.",
+        )
+    model = (
+        (payload.model or "").strip()
+        or (entry.model if entry else "")
+        or key_pool_engine.DEFAULT_MODELS[provider]
+    )
+    api_key = (payload.api_key or "").strip() or (entry.api_key if entry else "")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No API key to test: pass `api_key` or a stored pool `id`.",
+        )
+    base_url = (payload.base_url or "").strip() or (
+        entry.base_url if entry else ""
+    )
+    if base_url and not base_url.lower().startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="base_url must be an http(s) URL.",
+        )
+
+    config = {
+        "ai_provider": provider,
+        "ai_model": model,
+        "ai_api_key": api_key,
+        "ai_base_url": base_url,
+    }
+
+    started = time.monotonic()
+    try:
+        text, model_used = vision_master.probe_key(config)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if entry is not None:
+            key_pool_engine.mark_success(entry.id, latency_ms=latency_ms)
+        return AiKeyTestResponse(
+            ok=True,
+            provider=provider,
+            model=model_used,
+            latency_ms=latency_ms,
+            preview=" ".join(text.split())[:160],
+            active_keys_count=key_pool_engine.active_keys_count(db),
+        )
+    except Exception as exc:  # noqa: BLE001 - report the provider error
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if entry is not None:
+            key_pool_engine.mark_failure(entry.id, exc)
+        logger.warning("AI key test failed (%s/%s): %s", provider, model, exc)
+        return AiKeyTestResponse(
+            ok=False,
+            provider=provider,
+            model=model,
+            latency_ms=latency_ms,
+            error=f"{type(exc).__name__}: {exc}"[:300],
+            active_keys_count=key_pool_engine.active_keys_count(db),
+        )
 
 
 # (reset_agent_flags is exported for the E2E harness; not exposed via HTTP to

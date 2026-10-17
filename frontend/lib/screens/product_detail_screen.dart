@@ -5,15 +5,17 @@ import 'package:provider/provider.dart';
 
 import '../models/product.dart';
 import '../providers/auth_provider.dart';
+import '../providers/cart_provider.dart';
 import '../providers/product_provider.dart';
 import '../providers/wishlist_provider.dart';
-import '../services/api_service.dart';
 import '../services/currency.dart';
 import '../widgets/app_theme.dart';
 import '../widgets/category_icon.dart';
 import '../widgets/condition_badge.dart';
 import '../widgets/trust_score_meter.dart';
+import 'cart_screen.dart';
 import 'chat_thread_screen.dart';
+import 'checkout_sheet.dart';
 
 /// Route pushed from the feed: full product presentation with Hero image,
 /// the Multi-Agent AI Inspection Report, the live seller identity + trust
@@ -34,6 +36,12 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   late String _status = widget.product.status;
   bool _isPurchasing = false;
 
+  /// 4-angle gallery state lives HERE (not inside the hero widget) so the
+  /// hero arrows, the thumbnail strip under the app bar and lightbox entry
+  /// all drive the exact same PageView.
+  final PageController _galleryController = PageController();
+  int _galleryPage = 0;
+
   Product get product => widget.product;
 
   bool get _isOwnListing =>
@@ -41,68 +49,105 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
   bool get _canBuy => _status == 'active' && !_isOwnListing && !_isPurchasing;
 
+  @override
+  void dispose() {
+    _galleryController.dispose();
+    super.dispose();
+  }
+
+  /// Smooth-animates the hero carousel to [index] (arrows + thumbnails).
+  void _jumpToPhoto(int index) {
+    final photos = product.photos;
+    if (index < 0 || index >= photos.length) return;
+    _galleryController.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _openLightbox(int initialIndex) {
+    final photos = product.photos;
+    if (photos.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => _LightboxViewer(
+          images: photos,
+          initialIndex: initialIndex,
+          category: product.category,
+        ),
+      ),
+    );
+  }
+
+  /// Buy / Reserve Now now opens the 4-step checkout (Part B Task 7): meetup
+  /// details -> payment -> emailed OTP -> order. The purchase call lives in
+  /// the sheet; here we only react to its result.
   Future<void> _purchase() async {
     if (!_canBuy) return;
 
-    final auth = context.read<AuthProvider>();
     final messenger = ScaffoldMessenger.of(context);
     final feed = context.read<ProductProvider>();
+    final cart = context.read<CartProvider>();
 
     setState(() => _isPurchasing = true);
-    try {
-      final result = await ApiService.instance.purchaseProduct(
-        productId: product.id,
-        token: auth.token,
-      );
-      if (!mounted) return;
-      setState(() => _status = result.productStatus);
-      // Refresh the feed in the background so the sold badge appears on the
-      // grid too (the provider keeps existing items visible during refresh).
-      unawaited(feed.loadProducts());
-      messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.success.withOpacity(0.92),
-          content: Text(
-            'Purchase confirmed — ${product.title} is yours! '
-            '${formatInr(result.finalPrice)} paid.',
-            style: const TextStyle(
-              color: Colors.black,
-              fontWeight: FontWeight.w700,
-            ),
+    final result = await showCheckoutSheet(context, product: product);
+    if (!mounted) return;
+    setState(() => _isPurchasing = false);
+    if (result == null) return;
+
+    setState(() => _status = result.productStatus);
+    // The backend empties this product from the cart on purchase.
+    cart.removeLocal(product.id);
+    // Refresh the feed in the background so the sold badge appears on the
+    // grid too (the provider keeps existing items visible during refresh).
+    unawaited(feed.loadProducts());
+    messenger.showSnackBar(
+      SnackBar(
+        backgroundColor: AppColors.success.withOpacity(0.92),
+        content: Text(
+          'Order placed — ${product.title} at ${formatInr(result.finalPrice)}!',
+          style: const TextStyle(
+            color: Colors.black,
+            fontWeight: FontWeight.w700,
           ),
         ),
+      ),
+    );
+  }
+
+  /// Cart button in the buy bar: adds the listing, or opens the cart when the
+  /// item is already parked there (Part B Task 7).
+  Future<void> _handleCartTap() async {
+    final cart = context.read<CartProvider>();
+    if (cart.contains(product.id)) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const CartScreen()),
       );
-    } on ApiException catch (error) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.danger.withOpacity(0.92),
-          content: Text(
-            error.message,
-            style: const TextStyle(color: Colors.black),
-          ),
-        ),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.danger.withOpacity(0.92),
-          content: Text(
-            'Purchase failed: $error',
-            style: const TextStyle(color: Colors.black),
-          ),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _isPurchasing = false);
+      return;
     }
+    final messenger = ScaffoldMessenger.of(context);
+    final ok = await cart.add(product.id);
+    if (!mounted) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Added "${product.title}" to your cart.'
+                : (cart.errorMessage ?? 'Could not add to cart.'),
+          ),
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
     final wishlist = context.watch<WishlistProvider>();
     final saved = wishlist.contains(product.id);
+    final cart = context.watch<CartProvider>();
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -113,8 +158,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         isPurchasing: _isPurchasing,
         isOwnListing: _isOwnListing,
         canBuy: _canBuy,
+        inCart: cart.contains(product.id),
         onBuy: _purchase,
         onChat: _openChatWithSeller,
+        onCartTap: _handleCartTap,
       ),
       body: CustomScrollView(
         slivers: [
@@ -163,12 +210,29 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   // Same Hero tag as ProductCard for the shared-element anim.
                   Hero(
                     tag: 'product-image-${product.id}',
-                    child: _HeroGallery(product: product),
+                    child: _HeroGallery(
+                      product: product,
+                      controller: _galleryController,
+                      page: _galleryPage,
+                      onPageChanged: (page) =>
+                          setState(() => _galleryPage = page),
+                      onOpenLightbox: _openLightbox,
+                      onJumpTo: _jumpToPhoto,
+                    ),
                   ),
                 ],
               ),
             ),
           ),
+          if (product.photos.length > 1)
+            SliverToBoxAdapter(
+              child: _GalleryThumbnailStrip(
+                photos: product.photos,
+                category: product.category,
+                current: _galleryPage,
+                onSelect: _jumpToPhoto,
+              ),
+            ),
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
@@ -351,6 +415,61 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
               ),
             ],
           ),
+          // College network (Task 3): the seller's campus + CET code.
+          if ((product.collegeName ?? '').trim().isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppColors.royalBlue.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: AppColors.royalBlue.withOpacity(0.3),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.school_outlined,
+                      size: 17, color: AppColors.royalBlue),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      product.collegeName!.trim(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                  if ((product.collegeCode ?? '').trim().isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppColors.royalBlue.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        'CET ${product.collegeCode!.trim()}',
+                        style: const TextStyle(
+                          color: AppColors.royalBlue,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           TrustScoreMeter(score: trustScore, label: 'Trust score'),
           // Task 5: buyer-seller chat entry point on every active listing
@@ -916,7 +1035,9 @@ class _BottomBuyBar extends StatelessWidget {
     required this.isPurchasing,
     required this.isOwnListing,
     required this.canBuy,
+    required this.inCart,
     required this.onBuy,
+    required this.onCartTap,
     this.onChat,
   });
 
@@ -925,7 +1046,9 @@ class _BottomBuyBar extends StatelessWidget {
   final bool isPurchasing;
   final bool isOwnListing;
   final bool canBuy;
+  final bool inCart;
   final VoidCallback onBuy;
+  final VoidCallback onCartTap;
   final VoidCallback? onChat;
 
   String get _label {
@@ -979,6 +1102,10 @@ class _BottomBuyBar extends StatelessWidget {
               ],
             ),
           ),
+          if (status == 'active' && !isOwnListing) ...[
+            const SizedBox(width: 8),
+            _CartActionButton(inCart: inCart, onTap: onCartTap),
+          ],
           if (showChat) ...[
             const SizedBox(width: 8),
             Expanded(
@@ -1045,6 +1172,50 @@ class _BottomBuyBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Square "Add to Cart" button for the pinned buy bar. Flips to a filled
+/// "in cart" state that opens the cart screen on tap (Part B Task 7).
+class _CartActionButton extends StatelessWidget {
+  const _CartActionButton({required this.inCart, required this.onTap});
+
+  final bool inCart;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: inCart ? 'In cart - view cart' : 'Add to cart',
+      child: Material(
+        color: inCart
+            ? AppColors.royalBlue.withOpacity(0.12)
+            : AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: inCart
+                ? AppColors.royalBlue.withOpacity(0.55)
+                : AppColors.hairline,
+            width: 1.2,
+          ),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: SizedBox(
+            width: 46,
+            height: 46,
+            child: Icon(
+              inCart ? Icons.shopping_cart : Icons.add_shopping_cart,
+              size: 20,
+              color:
+                  inCart ? AppColors.royalBlue : AppColors.textPrimary,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1169,71 +1340,46 @@ class _DetailImage extends StatelessWidget {
 
 /// 4-angle photo gallery inside the Hero header: swipeable PageView over
 /// [Product.photos] (front/back/side/label from the vision scan, else just
-/// the cover) with a page counter + dot indicator and the app's signature
-/// top/bottom scrim.
-class _HeroGallery extends StatefulWidget {
-  const _HeroGallery({required this.product});
+/// the cover) with prev/next arrows, a page counter and the app's signature
+/// top/bottom scrim. The [PageController] is owned by the detail screen so
+/// the thumbnail strip below the app bar stays in lockstep.
+class _HeroGallery extends StatelessWidget {
+  const _HeroGallery({
+    required this.product,
+    required this.controller,
+    required this.page,
+    required this.onPageChanged,
+    required this.onOpenLightbox,
+    required this.onJumpTo,
+  });
 
   final Product product;
-
-  @override
-  State<_HeroGallery> createState() => _HeroGalleryState();
-}
-
-class _HeroGalleryState extends State<_HeroGallery> {
-  late final PageController _controller;
-  int _page = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = PageController();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _openLightbox(int initialIndex, List<String> images) {
-    if (images.isEmpty) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        fullscreenDialog: true,
-        builder: (_) => _LightboxViewer(
-          images: images,
-          initialIndex: initialIndex,
-          category: widget.product.category,
-        ),
-      ),
-    );
-  }
+  final PageController controller;
+  final int page;
+  final ValueChanged<int> onPageChanged;
+  final ValueChanged<int> onOpenLightbox;
+  final ValueChanged<int> onJumpTo;
 
   @override
   Widget build(BuildContext context) {
-    final category = widget.product.category;
-    final photos = widget.product.photos;
+    final category = product.category;
+    final photos = product.photos;
 
     return Stack(
       fit: StackFit.expand,
       children: [
         if (photos.isEmpty)
           GestureDetector(
-            onTap: () {
-              if (widget.product.imageUrl.isNotEmpty) {
-                _openLightbox(0, [widget.product.imageUrl]);
-              }
-            },
-            child: _DetailImage(url: widget.product.imageUrl, category: category),
+            onTap: () => onOpenLightbox(0),
+            child: _DetailImage(url: product.imageUrl, category: category),
           )
         else
           PageView.builder(
-            controller: _controller,
+            controller: controller,
             itemCount: photos.length,
-            onPageChanged: (page) => setState(() => _page = page),
+            onPageChanged: onPageChanged,
             itemBuilder: (context, index) => GestureDetector(
-              onTap: () => _openLightbox(index, photos),
+              onTap: () => onOpenLightbox(index),
               child: _DetailImage(
                 url: photos[index],
                 category: category,
@@ -1255,6 +1401,34 @@ class _HeroGalleryState extends State<_HeroGallery> {
           ),
         ),
         if (photos.length > 1) ...[
+          // Prev / next arrows: the fastest way to flip through all four
+          // inspection angles without precision swipes.
+          Positioned(
+            left: 10,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: _GalleryArrowButton(
+                icon: Icons.chevron_left,
+                tooltip: 'Previous photo',
+                enabled: page > 0,
+                onTap: () => onJumpTo(page - 1),
+              ),
+            ),
+          ),
+          Positioned(
+            right: 10,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: _GalleryArrowButton(
+                icon: Icons.chevron_right,
+                tooltip: 'Next photo',
+                enabled: page < photos.length - 1,
+                onTap: () => onJumpTo(page + 1),
+              ),
+            ),
+          ),
           Positioned(
             left: 14,
             bottom: 12,
@@ -1266,7 +1440,7 @@ class _HeroGalleryState extends State<_HeroGallery> {
                 border: Border.all(color: Colors.white24),
               ),
               child: Text(
-                '${_page + 1} / ${photos.length}',
+                '${page + 1} / ${photos.length}',
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 11,
@@ -1285,10 +1459,10 @@ class _HeroGalleryState extends State<_HeroGallery> {
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
                     margin: const EdgeInsets.only(left: 5),
-                    width: index == _page ? 16 : 6,
+                    width: index == page ? 16 : 6,
                     height: 6,
                     decoration: BoxDecoration(
-                      color: index == _page
+                      color: index == page
                           ? AppColors.royalBlue
                           : Colors.white54,
                       borderRadius: BorderRadius.circular(999),
@@ -1299,6 +1473,155 @@ class _HeroGalleryState extends State<_HeroGallery> {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// Glassy circular prev/next control over the hero photo (dimmed + inert at
+/// the ends of the gallery).
+class _GalleryArrowButton extends StatelessWidget {
+  const _GalleryArrowButton({
+    required this.icon,
+    required this.tooltip,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 160),
+      opacity: enabled ? 1 : 0.32,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: enabled ? onTap : null,
+          child: Tooltip(
+            message: tooltip,
+            child: Container(
+              width: 36,
+              height: 36,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.black.withOpacity(0.5),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Icon(icon, size: 24, color: Colors.white),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Thumbnail strip under the hero: tap any shot to jump the carousel there.
+/// Labels follow the 4-angle scan convention (front/back/side/label).
+class _GalleryThumbnailStrip extends StatelessWidget {
+  const _GalleryThumbnailStrip({
+    required this.photos,
+    required this.category,
+    required this.current,
+    required this.onSelect,
+  });
+
+  final List<String> photos;
+  final String category;
+  final int current;
+  final ValueChanged<int> onSelect;
+
+  static const List<String> _angleLabels = [
+    'Front',
+    'Back',
+    'Side',
+    'Label',
+  ];
+
+  String _labelFor(int index) => photos.length == _angleLabels.length
+      ? _angleLabels[index]
+      : 'Photo ${index + 1}';
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.collections_outlined,
+                size: 14,
+                color: AppColors.royalBlue,
+              ),
+              SizedBox(width: 6),
+              Text(
+                'PHOTO GALLERY',
+                style: TextStyle(
+                  color: AppColors.textMuted,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 76,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: photos.length,
+              separatorBuilder: (context, index) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                final selected = index == current;
+                return GestureDetector(
+                  onTap: () => onSelect(index),
+                  child: Column(
+                    children: [
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: 56,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: selected
+                                ? AppColors.royalBlue
+                                : AppColors.hairline,
+                            width: selected ? 2.2 : 1.2,
+                          ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: _DetailImage(url: photos[index], category: category),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        _labelFor(index),
+                        style: TextStyle(
+                          color: selected
+                              ? AppColors.royalBlue
+                              : AppColors.textMuted,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1360,7 +1683,9 @@ class _AiTagsBlock extends StatelessWidget {
   }
 }
 
-/// Full-screen zoomable lightbox viewer for inspecting photos from all angles.
+/// Full-screen zoomable lightbox viewer for inspecting photos from all
+/// angles: swipe (or use the arrows / thumbnail strip) between shots, pinch
+/// or double-tap to zoom in on details.
 class _LightboxViewer extends StatefulWidget {
   const _LightboxViewer({
     required this.images,
@@ -1380,6 +1705,10 @@ class _LightboxViewerState extends State<_LightboxViewer> {
   late final PageController _pageController;
   late int _currentIndex;
 
+  /// True while the CURRENT photo is pinch-zoomed: the PageView then stops
+  /// claiming horizontal drags so they pan the image instead of the pager.
+  bool _zoomed = false;
+
   @override
   void initState() {
     super.initState();
@@ -1393,8 +1722,19 @@ class _LightboxViewerState extends State<_LightboxViewer> {
     super.dispose();
   }
 
+  void _jumpTo(int index) {
+    if (index < 0 || index >= widget.images.length) return;
+    _pageController.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final images = widget.images;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -1402,7 +1742,7 @@ class _LightboxViewerState extends State<_LightboxViewer> {
         foregroundColor: Colors.white,
         elevation: 0,
         title: Text(
-          'Photo ${_currentIndex + 1} of ${widget.images.length}',
+          'Photo ${_currentIndex + 1} of ${images.length}',
           style: const TextStyle(
             color: Colors.white,
             fontSize: 16,
@@ -1417,61 +1757,223 @@ class _LightboxViewerState extends State<_LightboxViewer> {
         ],
       ),
       body: Stack(
-        alignment: Alignment.bottomCenter,
         children: [
           PageView.builder(
             controller: _pageController,
-            itemCount: widget.images.length,
-            onPageChanged: (index) => setState(() => _currentIndex = index),
+            // Once zoomed, the pager yields every drag to the image so the
+            // student can pan around a close-up instead of flipping photos.
+            physics: _zoomed
+                ? const NeverScrollableScrollPhysics()
+                : const PageScrollPhysics(),
+            itemCount: images.length,
+            onPageChanged: (index) => setState(() {
+              _currentIndex = index;
+              _zoomed = false;
+            }),
             itemBuilder: (context, index) {
-              final url = widget.images[index];
-              return InteractiveViewer(
-                minScale: 1.0,
-                maxScale: 4.0,
-                child: Center(
-                  child: url.isEmpty
-                      ? ImageFallbackIcon(category: widget.category, size: 64)
-                      : Image.network(
-                          url,
-                          fit: BoxFit.contain,
-                          loadingBuilder: (context, child, progress) {
-                            if (progress == null) return child;
-                            return const Center(
-                              child: CircularProgressIndicator(
-                                color: Colors.white70,
-                                strokeWidth: 2.5,
-                              ),
-                            );
-                          },
-                          errorBuilder: (context, error, stack) =>
-                              ImageFallbackIcon(category: widget.category, size: 64),
-                        ),
-                ),
+              return _ZoomableImage(
+                url: images[index],
+                category: widget.category,
+                onZoomChanged: (zoomed) {
+                  if (!mounted || zoomed == _zoomed) return;
+                  setState(() => _zoomed = zoomed);
+                },
               );
             },
           ),
-          if (widget.images.length > 1)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 24),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(
-                  widget.images.length,
-                  (index) => Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    width: index == _currentIndex ? 16 : 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: index == _currentIndex
-                          ? AppColors.royalBlue
-                          : Colors.white38,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
+          if (images.length > 1) ...[
+            Positioned(
+              left: 8,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: _GalleryArrowButton(
+                  icon: Icons.chevron_left,
+                  tooltip: 'Previous photo',
+                  enabled: _currentIndex > 0,
+                  onTap: () => _jumpTo(_currentIndex - 1),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 8,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: _GalleryArrowButton(
+                  icon: Icons.chevron_right,
+                  tooltip: 'Next photo',
+                  enabled: _currentIndex < images.length - 1,
+                  onTap: () => _jumpTo(_currentIndex + 1),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _LightboxThumbnails(
+                    photos: images,
+                    category: widget.category,
+                    current: _currentIndex,
+                    onSelect: _jumpTo,
                   ),
                 ),
               ),
             ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+/// One inspectable lightbox photo.
+///
+/// Gesture contract (fixes the classic zoom-vs-swipe fight):
+///  * at 1x - pan gestures stay OFF so horizontal swipes reach the PageView,
+///    while pinch-to-zoom still works;
+///  * zoomed in - pan ON, so dragging inspects the photo, and the parent
+///    pager switches to NeverScrollableScrollPhysics;
+///  * double-tap toggles a 2.5x zoom anchored at the tapped point.
+class _ZoomableImage extends StatefulWidget {
+  const _ZoomableImage({
+    required this.url,
+    required this.category,
+    required this.onZoomChanged,
+  });
+
+  final String url;
+  final String category;
+  final ValueChanged<bool> onZoomChanged;
+
+  @override
+  State<_ZoomableImage> createState() => _ZoomableImageState();
+}
+
+class _ZoomableImageState extends State<_ZoomableImage> {
+  static const double _doubleTapScale = 2.5;
+
+  final TransformationController _transformation = TransformationController();
+  bool _zoomed = false;
+
+  @override
+  void dispose() {
+    _transformation.dispose();
+    super.dispose();
+  }
+
+  void _syncZoomState() {
+    final zoomed = _transformation.value.getMaxScaleOnAxis() > 1.01;
+    if (zoomed == _zoomed) return;
+    setState(() => _zoomed = zoomed);
+    widget.onZoomChanged(zoomed);
+  }
+
+  void _handleDoubleTapDown(TapDownDetails details) {
+    if (_zoomed) {
+      _transformation.value = Matrix4.identity();
+    } else {
+      final point = details.localPosition;
+      _transformation.value = Matrix4.identity()
+        ..translate(
+          -point.dx * (_doubleTapScale - 1),
+          -point.dy * (_doubleTapScale - 1),
+        )
+        ..scale(_doubleTapScale);
+    }
+    _syncZoomState();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final image = widget.url.isEmpty
+        ? ImageFallbackIcon(category: widget.category, size: 64)
+        : Image.network(
+            widget.url,
+            fit: BoxFit.contain,
+            loadingBuilder: (context, child, progress) {
+              if (progress == null) return child;
+              return const Center(
+                child: CircularProgressIndicator(
+                  color: Colors.white70,
+                  strokeWidth: 2.5,
+                ),
+              );
+            },
+            errorBuilder: (context, error, stack) =>
+                ImageFallbackIcon(category: widget.category, size: 64),
+          );
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onDoubleTapDown: _handleDoubleTapDown,
+      child: InteractiveViewer(
+        transformationController: _transformation,
+        minScale: 1.0,
+        maxScale: 4.0,
+        panEnabled: _zoomed,
+        onInteractionEnd: (details) => _syncZoomState(),
+        child: Center(child: image),
+      ),
+    );
+  }
+}
+
+/// Compact photo strip pinned to the bottom of the lightbox: tap a shot to
+/// jump the pager straight to it.
+class _LightboxThumbnails extends StatelessWidget {
+  const _LightboxThumbnails({
+    required this.photos,
+    required this.category,
+    required this.current,
+    required this.onSelect,
+  });
+
+  final List<String> photos;
+  final String category;
+  final int current;
+  final ValueChanged<int> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 46,
+      child: Center(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              for (var index = 0; index < photos.length; index++) ...[
+                if (index > 0) const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () => onSelect(index),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: index == current
+                            ? AppColors.royalBlue
+                            : Colors.white24,
+                        width: index == current ? 2.2 : 1.2,
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: _DetailImage(url: photos[index], category: category),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

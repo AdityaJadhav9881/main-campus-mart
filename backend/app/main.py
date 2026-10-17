@@ -24,7 +24,17 @@ from fastapi.staticfiles import StaticFiles
 from .auth import PROTECTED_ADMIN_EMAILS, SUPER_ADMIN_EMAIL, init_firebase
 from .database import Base, SessionLocal, engine
 from .models import User
-from .routers import admin, auth_routes, chat, products, transactions, users
+from .routers import (
+    admin,
+    auth_routes,
+    cart,
+    chat,
+    colleges,
+    notifications,
+    products,
+    transactions,
+    users,
+)
 from .schema_upgrade import upgrade_schema
 from .storage import UPLOAD_DIR
 
@@ -150,6 +160,10 @@ app.include_router(transactions.router) # /products/{id}/purchase , /transaction
 app.include_router(admin.router)        # /admin/* master control (Phase 7 + ai-config)
 app.include_router(chat.router)         # /chats/* buyer-seller messaging (Task 5)
 app.include_router(chat.ai_router)      # /ai/chat student assistant (Task 5)
+app.include_router(colleges.router)     # /colleges CET Cell directory (college
+                                        # network + My College filter)
+app.include_router(notifications.router)  # /notifications/* bell-icon feed
+app.include_router(cart.router)         # /cart/* staging area before checkout
 
 
 @app.get("/", tags=["health"])

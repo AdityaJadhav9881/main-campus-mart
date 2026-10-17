@@ -1,28 +1,28 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../models/product.dart';
+import '../models/college.dart';
 import '../providers/auth_provider.dart';
-import '../providers/product_provider.dart';
+import '../providers/cart_provider.dart';
 import '../providers/wishlist_provider.dart';
-import '../services/api_service.dart';
-import '../services/currency.dart';
 import '../widgets/app_theme.dart';
-import '../widgets/category_icon.dart';
+import '../widgets/college_picker_sheet.dart';
 import '../widgets/trust_score_meter.dart';
-import 'product_detail_screen.dart';
+import 'cart_screen.dart';
+import 'my_listings_screen.dart';
+import 'orders_screen.dart';
+import 'saved_listings_screen.dart';
 
 /// Tab 3 - Profile & Campus Trust.
 ///
 /// Shows the real logged-in student's identity, the live trust score on the
 /// API's 0-5.0 scale with a dynamic tier badge, a Log Out action, and a
-/// 3-tab activity view wired to live data:
-///   * **My Listings** - own active items (from GET /products/) plus items
-///     already sold (from GET /transactions/my), each with a Delete action
-///     wired to DELETE /products/{id}.
-///   * **Purchased** - GET /transactions/my -> `bought`.
+/// 4-tile action grid (Part B Task 7):
+///   * **My Listings** - active + sold posts with Delete (own screen).
+///   * **My Orders** - buys + sales with order status and Message actions.
+///   * **My Cart** - parked listings with a live count badge.
 ///   * **Saved** - wishlist hearts persisted by WishlistProvider.
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -32,58 +32,6 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  TransactionHistory? _history;
-  bool _historyLoading = false;
-  String? _historyError;
-  bool _didBootstrap = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_didBootstrap) return;
-    _didBootstrap = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _reload();
-    });
-  }
-
-  Future<void> _reload() async {
-    final auth = context.read<AuthProvider>();
-    final feed = context.read<ProductProvider>();
-    if (auth.token.isEmpty) return;
-
-    setState(() {
-      _historyLoading = true;
-      _historyError = null;
-    });
-
-    // Refresh the feed in parallel with the transaction history.
-    final feedFuture = feed.products.isEmpty ? feed.loadProducts() : null;
-
-    try {
-      final history = await ApiService.instance.fetchMyTransactions(
-        token: auth.token,
-      );
-      if (!mounted) return;
-      setState(() {
-        _history = history;
-        _historyLoading = false;
-      });
-    } on ApiException catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _historyError = error.message;
-        _historyLoading = false;
-      });
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _historyError = 'Could not load activity: $error';
-        _historyLoading = false;
-      });
-    }
-    if (feedFuture != null) await feedFuture;
-  }
 
   Future<void> _confirmLogout(BuildContext context, AuthProvider auth) async {
     final confirmed = await showDialog<bool>(
@@ -121,117 +69,51 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  Future<void> _deleteListing(Product product) async {
+  /// Profile-tab college editor: swap the campus network via the CET sheet.
+  Future<void> _editCollege() async {
     final auth = context.read<AuthProvider>();
-    final feed = context.read<ProductProvider>();
+    final profile = auth.profile;
+    final hasCollege =
+        profile != null && (profile.collegeName ?? '').trim().isNotEmpty;
+    final picked = await showCollegePickerSheet(
+      context,
+      initial: hasCollege
+          ? College(
+              code: profile.collegeCode ?? '',
+              name: profile.collegeName!,
+              shortName: '',
+              city: '',
+            )
+          : null,
+      title: 'Your campus network',
+    );
+    if (picked == null || !mounted) return;
+    final ok = await auth.updateCollege(
+      collegeName: picked.name,
+      collegeCode: picked.code,
+    );
     if (!mounted) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text(
-          'Delete this listing?',
-          style: TextStyle(
-            color: AppColors.textPrimary,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor:
+            (ok ? AppColors.success : AppColors.danger).withOpacity(0.92),
         content: Text(
-          '"${product.title}" will be removed from the marketplace. '
-          'This cannot be undone.',
-          style: const TextStyle(color: AppColors.textMuted, fontSize: 13.5),
+          ok
+              ? 'Campus network updated - new listings will carry ${picked.name}.'
+              : (auth.errorMessage ?? 'Could not update your college.'),
+          style: const TextStyle(
+            color: Colors.black,
+            fontWeight: FontWeight.w700,
+          ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: AppColors.textMuted),
-            ),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
-            child: const Text('Delete'),
-          ),
-        ],
       ),
     );
-    if (confirmed != true || !mounted) return;
-
-    try {
-      await ApiService.instance.deleteProduct(
-        productId: product.id,
-        token: auth.token,
-      );
-      if (!mounted) return;
-      context.read<WishlistProvider>().remove(product.id);
-      await feed.loadProducts();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.success.withOpacity(0.92),
-          content: Text(
-            '"${product.title}" deleted',
-            style: const TextStyle(
-              color: Colors.black,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      );
-      await _reload();
-    } on ApiException catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.danger.withOpacity(0.92),
-          content: Text(
-            error.message,
-            style: const TextStyle(color: Colors.black),
-          ),
-        ),
-      );
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
-    final feed = context.watch<ProductProvider>();
-    final wishlist = context.watch<WishlistProvider>();
     final profile = auth.profile;
-
-    final myUid = profile?.id ?? '';
-    final activeListings =
-        feed.products.where((p) => p.sellerId == myUid).toList();
-
-    // Sold items come from the transaction history (never in the feed).
-    final soldProducts = <String, Product>{};
-    for (final tx in _history?.sold ?? const <TransactionRecord>[]) {
-      if (tx.productTitle == null) continue;
-      soldProducts[tx.productId] = Product(
-        id: tx.productId,
-        sellerId: myUid,
-        title: tx.productTitle!,
-        createdAt: tx.timestamp,
-        imageUrl: tx.productImageUrl ?? '',
-        listedPrice: tx.finalPrice,
-        status: tx.productStatus ?? 'sold',
-      );
-    }
-    final myListings = <Product>[
-      ...activeListings,
-      ...soldProducts.values.where(
-        (sold) => !activeListings.any((active) => active.id == sold.id),
-      ),
-    ];
-
-    final purchased = _history?.bought ?? const <TransactionRecord>[];
-    final savedProducts = feed.products
-        .where((product) => wishlist.contains(product.id))
-        .toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -250,9 +132,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         color: AppColors.royalBlue,
         backgroundColor: AppColors.surface,
         onRefresh: () async {
+          final cart = context.read<CartProvider>();
           await auth.refreshProfile();
-          await feed.loadProducts();
-          await _reload();
+          await cart.load();
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -292,27 +174,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 memberSince: profile.createdAt,
                 status: profile.status,
               ),
+              const SizedBox(height: 12),
+              _CollegeNetworkCard(
+                collegeName: profile.collegeName,
+                collegeCode: profile.collegeCode,
+                onEdit: _editCollege,
+              ),
               const SizedBox(height: 16),
               _TrustCard(score: profile.trustScore),
               const SizedBox(height: 16),
-              _ActivitySection(
-                myListings: myListings,
-                purchased: purchased,
-                savedProducts: savedProducts,
-                historyLoading: _historyLoading,
-                historyError: _historyError,
-                onDeleteListing: _deleteListing,
-                onRetryHistory: _reload,
-                onOpenProduct: (product) {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => ProductDetailScreen(product: product),
-                    ),
-                  );
-                },
-              ),
+              const _ProfileActionTiles(),
               const SizedBox(height: 20),
               const _HelpAndSupportCard(),
+              const SizedBox(height: 20),
+              const _AboutCard(),
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
@@ -462,6 +337,116 @@ class _ProfileHeader extends StatelessWidget {
   }
 }
 
+/// College-network card (Task 3): shows the student's CET college + code and
+/// opens the picker sheet to swap campuses (their next listings inherit it).
+class _CollegeNetworkCard extends StatelessWidget {
+  const _CollegeNetworkCard({
+    required this.collegeName,
+    required this.collegeCode,
+    required this.onEdit,
+  });
+
+  final String? collegeName;
+  final String? collegeCode;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = (collegeName ?? '').trim();
+    final code = (collegeCode ?? '').trim();
+    final linked = name.isNotEmpty;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: linked
+              ? AppColors.royalBlue.withOpacity(0.35)
+              : AppColors.hairline,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: AppColors.royalBlue.withOpacity(0.1),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.school_outlined,
+              size: 20,
+              color: AppColors.royalBlue,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'CAMPUS NETWORK',
+                  style: TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  linked ? name : 'Not linked to a college yet',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: linked
+                        ? AppColors.textPrimary
+                        : AppColors.textMuted,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    height: 1.25,
+                  ),
+                ),
+                if (linked) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    [
+                      if (code.isNotEmpty) 'CET $code',
+                      'You get alerts when students at your college post.',
+                    ].join(' Â· '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 11,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: onEdit,
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.royalBlue,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            ),
+            child: Text(
+              linked ? 'Change' : 'Set',
+              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Trust card: `x.x / 5.0`, a `score / 5.0` progress bar, and a dynamic
 /// tier badge (Elite Trusted Student / Verified Student / ...).
 class _TrustCard extends StatelessWidget {
@@ -585,528 +570,179 @@ class _TrustCard extends StatelessWidget {
   }
 }
 
-/// 3-tab activity view: My Listings / Purchased / Saved.
-class _ActivitySection extends StatelessWidget {
-  const _ActivitySection({
-    required this.myListings,
-    required this.purchased,
-    required this.savedProducts,
-    required this.historyLoading,
-    required this.historyError,
-    required this.onDeleteListing,
-    required this.onRetryHistory,
-    required this.onOpenProduct,
-  });
-
-  final List<Product> myListings;
-  final List<TransactionRecord> purchased;
-  final List<Product> savedProducts;
-  final bool historyLoading;
-  final String? historyError;
-  final ValueChanged<Product> onDeleteListing;
-  final Future<void> Function() onRetryHistory;
-  final ValueChanged<Product> onOpenProduct;
+/// 4-tile action grid (Part B Task 7): My Listings / My Orders / My Cart /
+/// Saved - each opens its own screen, so the profile stays a trust summary
+/// while activity lives where it has room to breathe.
+class _ProfileActionTiles extends StatelessWidget {
+  const _ProfileActionTiles();
 
   @override
   Widget build(BuildContext context) {
-    final hasAnyActivity =
-        myListings.isNotEmpty || purchased.isNotEmpty || savedProducts.isNotEmpty;
+    final cartCount = context.watch<CartProvider>().count;
+    final savedCount = context.watch<WishlistProvider>().count;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.hairline),
+    return GridView.count(
+      crossAxisCount: 2,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      mainAxisSpacing: 12,
+      crossAxisSpacing: 12,
+      childAspectRatio: 1.62,
+      children: [
+        _ProfileActionTile(
+          icon: Icons.storefront_outlined,
+          label: 'My Listings',
+          caption: 'Manage your posts',
+          tint: AppColors.royalBlue,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const MyListingsScreen()),
+          ),
+        ),
+        _ProfileActionTile(
+          icon: Icons.receipt_long_outlined,
+          label: 'My Orders',
+          caption: 'Purchases & sales',
+          tint: AppColors.success,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const OrdersScreen()),
+          ),
+        ),
+        _ProfileActionTile(
+          icon: Icons.shopping_cart_outlined,
+          label: 'My Cart',
+          caption:
+              cartCount == 0 ? 'Nothing parked yet' : '$cartCount waiting',
+          tint: AppColors.warning,
+          badge: cartCount,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const CartScreen()),
+          ),
+        ),
+        _ProfileActionTile(
+          icon: Icons.favorite_border,
+          label: 'Saved',
+          caption: savedCount == 0 ? 'Heart items to save' : '$savedCount saved',
+          tint: AppColors.danger,
+          badge: savedCount,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => const SavedListingsScreen(),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One tile in the 4-tile action grid.
+class _ProfileActionTile extends StatelessWidget {
+  const _ProfileActionTile({
+    required this.icon,
+    required this.label,
+    required this.caption,
+    required this.tint,
+    required this.onTap,
+    this.badge = 0,
+  });
+
+  final IconData icon;
+  final String label;
+  final String caption;
+  final Color tint;
+  final VoidCallback onTap;
+  final int badge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: AppColors.hairline),
       ),
       clipBehavior: Clip.antiAlias,
-      child: DefaultTabController(
-        length: 3,
-        child: Column(
-          children: [
-            const Material(
-              color: Colors.transparent,
-              child: TabBar(
-                labelColor: AppColors.royalBlue,
-                unselectedLabelColor: AppColors.textMuted,
-                indicatorColor: AppColors.royalBlue,
-                indicatorWeight: 2.5,
-                labelStyle: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w800,
-                ),
-                unselectedLabelStyle: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                ),
-                tabs: [
-                  Tab(text: 'My Listings'),
-                  Tab(text: 'Purchased'),
-                  Tab(text: 'Saved'),
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+          child: Row(
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: tint.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: Icon(icon, size: 20, color: tint),
+                  ),
+                  if (badge > 0)
+                    Positioned(
+                      right: -5,
+                      top: -5,
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 17),
+                        height: 17,
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.danger,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: AppColors.surface,
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Center(
+                          child: Text(
+                            badge > 9 ? '9+' : '$badge',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w900,
+                              height: 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
-            ),
-            if (historyError != null && hasAnyActivity) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-                child: Row(
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(
-                      Icons.sync_problem_outlined,
-                      size: 14,
-                      color: AppColors.warning,
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Purchase history unavailable — pull down to retry.',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: AppColors.warning.withOpacity(0.9),
-                          fontSize: 11,
-                        ),
+                    const SizedBox(height: 2),
+                    Text(
+                      caption,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 10.5,
                       ),
                     ),
                   ],
                 ),
               ),
             ],
-            if (historyLoading && purchased.isEmpty && !hasAnyActivity)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 42),
-                child: CircularProgressIndicator(
-                  color: AppColors.royalBlue,
-                ),
-              )
-            else if (historyError != null && !hasAnyActivity)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-                child: Column(
-                  children: [
-                    Text(
-                      historyError!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: AppColors.warning,
-                        fontSize: 12.5,
-                        height: 1.4,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextButton(
-                      onPressed: onRetryHistory,
-                      child: const Text(
-                        'Retry',
-                        style: TextStyle(
-                          color: AppColors.royalBlue,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else
-              SizedBox(
-                // 3 tabs x ~240px content each is plenty; the rail itself
-                // scrolls vertically inside each tab.
-                height: 320,
-                child: TabBarView(
-                  children: [
-                    _MyListingsTab(
-                      listings: myListings,
-                      onDelete: onDeleteListing,
-                      onOpen: onOpenProduct,
-                    ),
-                    _PurchasedTab(records: purchased),
-                    _SavedTab(products: savedProducts, onOpen: onOpenProduct),
-                  ],
-                ),
-              ),
-          ],
+          ),
         ),
-      ),
-    );
-  }
-}
-
-/// Tab 1 - the student's own listings with a Delete action.
-class _MyListingsTab extends StatelessWidget {
-  const _MyListingsTab({
-    required this.listings,
-    required this.onDelete,
-    required this.onOpen,
-  });
-
-  final List<Product> listings;
-  final ValueChanged<Product> onDelete;
-  final ValueChanged<Product> onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    if (listings.isEmpty) {
-      return const _EmptyTab(
-        icon: Icons.storefront_outlined,
-        message: 'No listings yet. Head to the Sell tab to post your first '
-            'item!',
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-      itemCount: listings.length,
-      itemBuilder: (context, index) {
-        final product = listings[index];
-        final isSold = product.status == 'sold';
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceHigh,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.hairline),
-            ),
-            child: Row(
-              children: [
-                InkWell(
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => onOpen(product),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: SizedBox(
-                      width: 52,
-                      height: 52,
-                      child: product.imageUrl.isEmpty
-                          ? ImageFallbackIcon(
-                              category: product.category,
-                              size: 24,
-                            )
-                          : Image.network(
-                              product.imageUrl,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => ImageFallbackIcon(
-                                category: product.category,
-                                size: 24,
-                              ),
-                            ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: InkWell(
-                    onTap: () => onOpen(product),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          product.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Text(
-                              '${formatInr(product.listedPrice)}'
-                              ' · ${product.condition}',
-                              style: const TextStyle(
-                                color: AppColors.textMuted,
-                                fontSize: 12,
-                              ),
-                            ),
-                            if (isSold) ...[
-                              const SizedBox(width: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AppColors.warning.withOpacity(0.15),
-                                  borderRadius: BorderRadius.circular(5),
-                                ),
-                                child: const Text(
-                                  'SOLD',
-                                  style: TextStyle(
-                                    color: AppColors.warning,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (!isSold)
-                  IconButton(
-                    tooltip: 'Delete listing',
-                    icon: const Icon(
-                      Icons.delete_outline,
-                      size: 20,
-                      color: AppColors.danger,
-                    ),
-                    onPressed: () => onDelete(product),
-                  )
-                else
-                  const Icon(
-                    Icons.check_circle_outline,
-                    size: 19,
-                    color: AppColors.success,
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Tab 2 - items bought by the student (GET /transactions/my -> bought).
-class _PurchasedTab extends StatelessWidget {
-  const _PurchasedTab({required this.records});
-
-  final List<TransactionRecord> records;
-
-  @override
-  Widget build(BuildContext context) {
-    if (records.isEmpty) {
-      return const _EmptyTab(
-        icon: Icons.shopping_bag_outlined,
-        message: 'Nothing purchased yet. Your buys will appear here.',
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-      itemCount: records.length,
-      itemBuilder: (context, index) {
-        final record = records[index];
-        final title = record.productTitle ?? 'Listing';
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceHigh,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.hairline),
-            ),
-            child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: SizedBox(
-                    width: 52,
-                    height: 52,
-                    child: (record.productImageUrl ?? '').isEmpty
-                        ? const ColoredBox(color: AppColors.surface)
-                        : Image.network(
-                            record.productImageUrl!,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => const ColoredBox(
-                              color: AppColors.surface,
-                              child: Icon(
-                                Icons.shopping_bag_outlined,
-                                size: 22,
-                                color: AppColors.textMuted,
-                              ),
-                            ),
-                          ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Paid ${formatInr(record.finalPrice)}'
-                        '${record.sellerName == null ? '' : ' · from ${record.sellerName}'}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textMuted,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        record.timestamp.toLocal().toString().split(' ').first,
-                        style: const TextStyle(
-                          color: AppColors.textMuted,
-                          fontSize: 10.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(
-                  Icons.check_circle,
-                  size: 19,
-                  color: AppColors.success,
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Tab 3 - wishlist hearts (persisted by WishlistProvider).
-class _SavedTab extends StatelessWidget {
-  const _SavedTab({required this.products, required this.onOpen});
-
-  final List<Product> products;
-  final ValueChanged<Product> onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    if (products.isEmpty) {
-      return const _EmptyTab(
-        icon: Icons.favorite_border,
-        message: 'Tap the heart on any listing to save it here for later.',
-      );
-    }
-
-    return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: 0.78,
-      ),
-      itemCount: products.length,
-      itemBuilder: (context, index) {
-        final product = products[index];
-        return Material(
-          color: AppColors.surfaceHigh,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: const BorderSide(color: AppColors.hairline),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: () => onOpen(product),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      product.imageUrl.isEmpty
-                          ? ImageFallbackIcon(
-                              category: product.category,
-                              size: 26,
-                            )
-                          : Image.network(
-                              product.imageUrl,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => ImageFallbackIcon(
-                                category: product.category,
-                                size: 26,
-                              ),
-                            ),
-                      const Positioned(
-                        top: 6,
-                        right: 6,
-                        child: Icon(
-                          Icons.favorite,
-                          size: 16,
-                          color: AppColors.danger,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 9),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        product.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        formatInr(product.listedPrice),
-                        style: const TextStyle(
-                          color: AppColors.inkBlack,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Shared empty-state used by the three activity tabs.
-class _EmptyTab extends StatelessWidget {
-  const _EmptyTab({required this.icon, required this.message});
-
-  final IconData icon;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 36, color: AppColors.textMuted),
-          const SizedBox(height: 12),
-          Text(
-            message,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: AppColors.textMuted,
-              fontSize: 13,
-              height: 1.45,
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1173,53 +809,217 @@ class _HelpAndSupportCard extends StatelessWidget {
           const SizedBox(height: 14),
           const Divider(height: 1),
           const SizedBox(height: 12),
+          const _SupportEmailRow(
+            icon: Icons.email_outlined,
+            label: 'Support Email:',
+            email: 'martaicampus@gmail.com',
+            emphasized: true,
+          ),
+          const SizedBox(height: 4),
+          const _SupportEmailRow(
+            icon: Icons.alternate_email,
+            label: 'General Desk:',
+            email: 'support@campusmart.in',
+            emphasized: false,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One support email row: tapping launches the mail client directly
+/// (external mailto intent); the copy icon is the secondary fallback that
+/// copies the address when no mail app handles the intent (Part B Task 8).
+class _SupportEmailRow extends StatelessWidget {
+  const _SupportEmailRow({
+    required this.icon,
+    required this.label,
+    required this.email,
+    required this.emphasized,
+  });
+
+  final IconData icon;
+  final String label;
+  final String email;
+  final bool emphasized;
+
+  Future<void> _launchMail(BuildContext context) async {
+    final uri = Uri(
+      scheme: 'mailto',
+      path: email,
+      queryParameters: const {'subject': 'CampusMart Support Inquiry'},
+    );
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched) return;
+    } catch (_) {
+      // Fall through to the clipboard fallback below.
+    }
+    if (!context.mounted) return;
+    await _copy(context);
+  }
+
+  Future<void> _copy(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: email));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        content: Text('Support email copied: $email'),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = emphasized ? AppColors.royalBlue : AppColors.textMuted;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () => _launchMail(context),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        child: Row(
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                email,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 13,
+                  fontWeight:
+                      emphasized ? FontWeight.w700 : FontWeight.w600,
+                ),
+              ),
+            ),
+            Tooltip(
+              message: 'Copy email',
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () => _copy(context),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(Icons.copy, size: 15, color: color),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// About card (Part B Task 8): official website link + platform identity.
+class _AboutCard extends StatelessWidget {
+  const _AboutCard();
+
+  static const String _websiteUrl = 'https://campus-mart-ivory.vercel.app';
+
+  Future<void> _openWebsite(BuildContext context) async {
+    final uri = Uri.parse(_websiteUrl);
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched) return;
+    } catch (_) {
+      // Fall through to the clipboard fallback below.
+    }
+    await Clipboard.setData(const ClipboardData(text: _websiteUrl));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 2),
+        content: Text('Website link copied: $_websiteUrl'),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: AppColors.inkBlack.withOpacity(0.82),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.info_outline,
+                  size: 20,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'About CampusMart Ai',
+                      style: TextStyle(
+                        fontFamily: 'Georgia',
+                        color: AppColors.inkBlack,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Campus commerce, reimagined with AI',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const Divider(height: 1),
+          const SizedBox(height: 12),
           InkWell(
             borderRadius: BorderRadius.circular(10),
-            onTap: () async {
-              final uri = Uri.parse(
-                'mailto:martaicampus@gmail.com?subject=CampusMart%20Support%20Inquiry',
-              );
-              try {
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri);
-                  return;
-                }
-              } catch (_) {}
-              await Clipboard.setData(
-                const ClipboardData(text: 'martaicampus@gmail.com'),
-              );
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Support email copied: martaicampus@gmail.com',
-                    ),
-                  ),
-                );
-              }
-            },
+            onTap: () => _openWebsite(context),
             child: const Padding(
               padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
               child: Row(
                 children: [
                   Icon(
-                    Icons.email_outlined,
+                    Icons.public,
                     size: 16,
                     color: AppColors.royalBlue,
                   ),
                   SizedBox(width: 10),
-                  Text(
-                    'Support Email:',
-                    style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      'martaicampus@gmail.com',
+                      'Visit Official Website',
                       style: TextStyle(
                         color: AppColors.royalBlue,
                         fontSize: 13,
@@ -1227,69 +1027,57 @@ class _HelpAndSupportCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Icon(Icons.open_in_new, size: 15, color: AppColors.royalBlue),
+                  Icon(
+                    Icons.open_in_new,
+                    size: 15,
+                    color: AppColors.royalBlue,
+                  ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 6),
-          InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: () async {
-              final uri = Uri.parse(
-                'mailto:support@campusmart.in?subject=CampusMart%20Support%20Inquiry',
-              );
-              try {
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri);
-                  return;
-                }
-              } catch (_) {}
-              await Clipboard.setData(
-                const ClipboardData(text: 'support@campusmart.in'),
-              );
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Support email copied: support@campusmart.in',
-                    ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.account_balance_outlined,
+                  size: 16,
+                  color: AppColors.textMuted,
+                ),
+                SizedBox(width: 10),
+                Text(
+                  'CET Cell Campus Network',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
                   ),
-                );
-              }
-            },
-            child: const Padding(
-              padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.alternate_email,
-                    size: 16,
-                    color: AppColors.textMuted,
-                  ),
-                  SizedBox(width: 10),
-                  Text(
-                    'General Desk:',
+                ),
+              ],
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.verified_outlined,
+                  size: 16,
+                  color: AppColors.success,
+                ),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'v2.5.0 Production · Verified OTP & Vision AI',
                     style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 13,
+                      color: AppColors.textMuted,
+                      fontSize: 12.5,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'support@campusmart.in',
-                      style: TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  Icon(Icons.copy, size: 15, color: AppColors.textMuted),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ],

@@ -10,12 +10,15 @@ One unified engine drives both:
     * POST /ai/chat - the "Ask CampusMart AI" student assistant.
 
 Supported providers (selected at runtime from the `system_config` table by
-PUT /admin/ai-config - NO redeploy needed):
+PUT /admin/ai-config - NO redeploy needed; multi-key routing is handled by
+`key_pool_engine`):
 
     gemini      Google  generativelanguage.googleapis.com  (inline base64 parts)
     openai      OpenAI  api.openai.com/v1                  (data-URI image_url)
     groq        Groq    api.groq.com/openai/v1             (OpenAI-compatible)
     openrouter  OpenRouter openrouter.ai/api/v1            (OpenAI-compatible)
+    mistral     Mistral api.mistral.ai/v1                  (OpenAI-compatible)
+    cerebras    Cerebras api.cerebras.ai/v1                (OpenAI-compatible)
 
 Design notes
 ------------
@@ -41,6 +44,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import httpx
@@ -48,16 +52,72 @@ from sqlalchemy.orm import Session
 
 from ..models import SystemConfig
 from ..storage import UPLOAD_DIR
+from . import key_pool_engine
 
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Provider registry
 # -----------------------------------------------------------------------------
-PROVIDERS: tuple[str, ...] = ("gemini", "openai", "groq", "openrouter")
+PROVIDERS: tuple[str, ...] = (
+    "gemini",
+    "openai",
+    "groq",
+    "openrouter",
+    "mistral",
+    "cerebras",
+)
 
 DEFAULT_PROVIDER = "gemini"
-DEFAULT_MODEL = "gemini-3.5-flash"
+# Latest GA Gemini Flash on the v1beta REST API. Never ship a model id Google
+# has not announced - an unknown id makes every vision call 404.
+DEFAULT_MODEL = "gemini-2.5-flash"
+
+# Tried in order whenever the configured gemini model errors. First entry in
+# the effective chain is always the (normalized) configured model.
+GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+)
+
+# Model ids that look plausible but do not exist on the REST API. Map them to
+# the nearest real model so a stale admin dashboard value self-heals instead
+# of 404-ing on every request.
+_GEMINI_MODEL_ALIASES: dict[str, str] = {
+    "gemini-3.5-flash": "gemini-2.5-flash",
+    "gemini-3.5-flash-lite": "gemini-2.5-flash",
+    "gemini-3.5-pro": "gemini-2.5-pro",
+    "gemini-3.6-flash": "gemini-2.5-flash",
+    "gemini-3-flash": "gemini-2.5-flash",
+    "gemini-3-pro": "gemini-2.5-pro",
+}
+
+
+def normalize_gemini_model(model: str | None) -> str:
+    """Map a stored/legacy gemini model id onto a real REST API model.
+
+    Known invalid ids (e.g. 'gemini-3.5-flash') are aliased; any other
+    'gemini-3*' experiment collapses to the latest GA flash.
+    """
+    cleaned = (model or "").strip()
+    if not cleaned:
+        return GEMINI_FALLBACK_MODELS[0]
+    if cleaned in _GEMINI_MODEL_ALIASES:
+        return _GEMINI_MODEL_ALIASES[cleaned]
+    lowered = cleaned.lower()
+    if lowered.startswith("gemini-3"):
+        return GEMINI_FALLBACK_MODELS[0]
+    return cleaned
+
+
+def gemini_model_chain(model: str | None) -> list[str]:
+    """The ordered, de-duplicated list of gemini models to attempt."""
+    chain: list[str] = []
+    for candidate in (normalize_gemini_model(model), *GEMINI_FALLBACK_MODELS):
+        if candidate and candidate not in chain:
+            chain.append(candidate)
+    return chain
 
 # Official default endpoints; PUT /admin/ai-config's `ai_base_url` overrides.
 PROVIDER_BASE_URLS: dict[str, str] = {
@@ -65,6 +125,8 @@ PROVIDER_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "cerebras": "https://api.cerebras.ai/v1",
 }
 
 # Per-request network budget. Vision calls move real bytes, so this is more
@@ -183,7 +245,9 @@ Return ONLY one JSON object (no markdown, no commentary, no code fences) with ex
   "category": string               - exactly one of {_CATEGORY_LIST}
   "condition": string              - exactly one of "Like New", "Good", "Fair"
   "condition_notes": string        - detailed 4-angle inspection summary: front/back/side/label wear,
-                                     scratches, dents, button/port condition, accessories/box
+                                     scratches, dents, button/port condition, accessories/box.
+                                     ALWAYS end with the price context in this exact pattern:
+                                     "(Retail ~₹<current Indian retail price>; expected used ₹<low>-₹<high>)"
   "price_min_inr": number          - realistic used-price floor in Indian Rupees (₹)
   "price_max_inr": number          - realistic used-price ceiling in Indian Rupees (₹)
   "suggested_price_inr": number    - fair-market resale value in ₹ (rounded to nearest 10)
@@ -206,6 +270,11 @@ PRICING RULES - Indian Rupees (₹) ONLY:
     - Stationery (Pens, sets, folders): ₹20 - ₹150
   * NEVER output US dollars ($). All numbers must be in INR (₹).
   * NEVER output generic $80 placeholder numbers.
+  * SANITY CHECK FIRST: establish the item's current Indian retail price (e.g. a Bose
+    SoundLink Flex retails at ~₹13,000 brand new). A working used unit is worth roughly
+    55-85% of that depending on condition - NEVER quote a tiny fraction (a working
+    Bose speaker is worth ₹8,500-₹10,500 used, never ₹3,000). Only go lower when the
+    photos clearly show heavy damage or missing parts.
   * Condition scaling: Like New ~= 85-90% of used fair market, Good ~= 70-75%, Fair ~= 50-60%.
 
 QUALITY RULES:
@@ -417,7 +486,12 @@ def _gemini_url(base_url: str, model: str, api_key: str) -> str:
     return f"{root}/models/{model}:generateContent?key={api_key}"
 
 
-def _gemini_body(prompt: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+def _gemini_body(
+    prompt: str,
+    images: list[dict[str, Any]],
+    *,
+    with_search_tools: bool = False,
+) -> dict[str, Any]:
     parts: list[dict[str, Any]] = [{"text": prompt}]
     for image in images:
         if image.get("b64"):
@@ -426,10 +500,34 @@ def _gemini_body(prompt: str, images: list[dict[str, Any]]) -> dict[str, Any]:
             )
         # Note: Do NOT attach file_data with external web URLs as Google Gemini
         # rejects non-Files-API URIs with INVALID_ARGUMENT.
-    return {
+    body: dict[str, Any] = {
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.25},
     }
+    if with_search_tools:
+        # Google Search grounding: lets the model check live Indian retail
+        # prices before quoting a resale range. Callers retry without it when
+        # the model/key does not support it.
+        body["tools"] = [{"google_search": {}}]
+    return body
+
+
+def _gemini_text(payload: dict[str, Any]) -> str:
+    """Pull the first text part out of a generateContent response."""
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        raise ValueError("gemini returned no candidates")
+    parts = ((candidates[0].get("content") or {}).get("parts")) or []
+    text = "".join(part.get("text", "") for part in parts)
+    if not text.strip():
+        raise ValueError("gemini returned empty content")
+    return text
+
+
+def _model_missing(exc: Exception) -> bool:
+    """True when the provider says this model id does not exist (HTTP 404)."""
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
 
 
 def _openai_body(
@@ -478,41 +576,56 @@ def _invoke_vision_llm(
     config: dict[str, str],
     prompt: str,
     images: list[dict[str, Any]],
-) -> str:
-    """Send the strict-JSON prompt + photos to the configured provider."""
+) -> tuple[str, str]:
+    """Send the strict-JSON prompt + photos to the configured provider.
+
+    Returns `(text, model_used)`. For gemini the attempt order per model is
+    "with Google Search grounding" -> "without tools" (models/keys that reject
+    the tools field), then the whole [gemini_model_chain] of fallbacks.
+    """
     provider = config["ai_provider"]
-    model = config["ai_model"]
     api_key = config["ai_api_key"]
 
     if provider == "gemini":
-        gemini_models: list[str] = []
-        for candidate in [model, "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
-            if candidate and candidate not in gemini_models:
-                gemini_models.append(candidate)
-
         last_exc: Exception | None = None
-        for m in gemini_models:
-            try:
-                payload = _post_json(
-                    _gemini_url(config["ai_base_url"], m, api_key),
-                    headers={"Content-Type": "application/json"},
-                    body=_gemini_body(prompt, images),
-                )
-                candidates = payload.get("candidates") or []
-                if not candidates:
-                    raise ValueError(f"gemini ({m}) returned no candidates")
-                parts = ((candidates[0].get("content") or {}).get("parts")) or []
-                text = "".join(part.get("text", "") for part in parts)
-                if not text.strip():
-                    raise ValueError(f"gemini ({m}) returned empty content")
-                return text
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("Gemini vision model %s failed: %s; trying next fallback", m, exc)
-                continue
+        for model_name in gemini_model_chain(config["ai_model"]):
+            for with_tools in (True, False):
+                try:
+                    payload = _post_json(
+                        _gemini_url(config["ai_base_url"], model_name, api_key),
+                        headers={"Content-Type": "application/json"},
+                        body=_gemini_body(
+                            prompt, images, with_search_tools=with_tools
+                        ),
+                    )
+                    return _gemini_text(payload), model_name
+                except Exception as exc:
+                    last_exc = exc
+                    if _model_missing(exc):
+                        logger.warning(
+                            "Gemini model %s does not exist (%s); next fallback",
+                            model_name,
+                            exc,
+                        )
+                        break
+                    if with_tools:
+                        logger.warning(
+                            "Gemini vision %s with search tools failed: %s; "
+                            "retrying without tools",
+                            model_name,
+                            exc,
+                        )
+                        continue
+                    logger.warning(
+                        "Gemini vision model %s failed: %s; trying next fallback",
+                        model_name,
+                        exc,
+                    )
+                    break
         if last_exc:
             raise last_exc
 
+    model = config["ai_model"]
     base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
     body = _openai_body(prompt, images)
     body["model"] = model
@@ -530,7 +643,7 @@ def _invoke_vision_llm(
         },
         body=body,
     )
-    return _openai_text(payload)
+    return _openai_text(payload), model
 
 
 def _invoke_text_llm(
@@ -540,19 +653,31 @@ def _invoke_text_llm(
     user_message: str,
     *,
     temperature: float = 0.5,
-) -> str:
-    """Text-only completion used by POST /ai/chat."""
+    images: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Chat completion used by POST /ai/chat. Returns `(text, model_used)`.
+
+    `images` (already-gathered photo dicts) turn the call multimodal so the
+    student assistant can inspect a photo they attached in chat.
+    """
     provider = config["ai_provider"]
-    model = config["ai_model"]
     api_key = config["ai_api_key"]
+    images = images or []
 
     if provider == "gemini":
-        gemini_models: list[str] = []
-        for candidate in [model, "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
-            if candidate and candidate not in gemini_models:
-                gemini_models.append(candidate)
+        user_parts: list[dict[str, Any]] = [{"text": user_message}]
+        for image in images:
+            if image.get("b64"):
+                user_parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": image["mime"],
+                            "data": image["b64"],
+                        }
+                    }
+                )
 
-        contents = [
+        contents: list[dict[str, Any]] = [
             {"role": "user", "parts": [{"text": system}]},
         ]
         for turn in history:
@@ -562,39 +687,69 @@ def _invoke_text_llm(
                     "parts": [{"text": str(turn.get("content", ""))}],
                 }
             )
-        contents.append({"role": "user", "parts": [{"text": user_message}]})
+        contents.append({"role": "user", "parts": user_parts})
 
         last_exc: Exception | None = None
-        for m in gemini_models:
-            try:
-                payload = _post_json(
-                    _gemini_url(config["ai_base_url"], m, api_key),
-                    headers={"Content-Type": "application/json"},
-                    body={
-                        "contents": contents,
-                        "generationConfig": {"temperature": temperature},
-                    },
-                )
-                candidates = payload.get("candidates") or []
-                parts = ((candidates[0].get("content") or {}).get("parts")) or [] if candidates else []
-                text = "".join(part.get("text", "") for part in parts)
-                if not text.strip():
-                    raise ValueError(f"gemini ({m}) returned empty content")
-                return text
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("Gemini text model %s failed: %s; trying next fallback", m, exc)
-                continue
+        for model_name in gemini_model_chain(config["ai_model"]):
+            for with_tools in (True, False):
+                body: dict[str, Any] = {
+                    "contents": contents,
+                    "generationConfig": {"temperature": temperature},
+                }
+                if with_tools:
+                    body["tools"] = [{"google_search": {}}]
+                try:
+                    payload = _post_json(
+                        _gemini_url(config["ai_base_url"], model_name, api_key),
+                        headers={"Content-Type": "application/json"},
+                        body=body,
+                    )
+                    return _gemini_text(payload), model_name
+                except Exception as exc:
+                    last_exc = exc
+                    if _model_missing(exc):
+                        logger.warning(
+                            "Gemini model %s does not exist (%s); next fallback",
+                            model_name,
+                            exc,
+                        )
+                        break
+                    if with_tools:
+                        logger.warning(
+                            "Gemini chat %s with search tools failed: %s; "
+                            "retrying without tools",
+                            model_name,
+                            exc,
+                        )
+                        continue
+                    logger.warning(
+                        "Gemini text model %s failed: %s; trying next fallback",
+                        model_name,
+                        exc,
+                    )
+                    break
         if last_exc:
             raise last_exc
 
+    model = config["ai_model"]
     base = (config["ai_base_url"] or PROVIDER_BASE_URLS[provider]).rstrip("/")
-    messages = [{"role": "system", "content": system}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(
         {"role": str(turn.get("role", "user")), "content": str(turn.get("content", ""))}
         for turn in history
     )
-    messages.append({"role": "user", "content": user_message})
+    if images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_message}]
+        for image in images:
+            url = (
+                f"data:{image['mime']};base64,{image['b64']}"
+                if image.get("b64")
+                else image["url"]
+            )
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": user_message})
     payload = _post_json(
         f"{base}/chat/completions",
         headers={
@@ -603,7 +758,7 @@ def _invoke_text_llm(
         },
         body={"model": model, "messages": messages, "temperature": temperature},
     )
-    return _openai_text(payload)
+    return _openai_text(payload), model
 
 
 # =============================================================================
@@ -743,21 +898,15 @@ def analyze_listing_images(
     description: str | None = None,
     condition: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect 4+ listing photos with the configured vision model.
+    """Inspect 4+ listing photos with the best available vision key.
 
-    Falls back to [heuristic_analyze] when no API key is stored yet, and also
-    when the provider errors (logged) - the Sell flow always gets a usable
-    INR answer instead of a 500.
+    Keys come from the routing pool (key_pool_engine.select_ordered_keys) -
+    every key is attempted in order, failures cool down automatically, and
+    a single provider outage never dead-ends the Sell flow: when no key is
+    configured (or every key fails) the deterministic INR heuristic answers
+    instead.
     """
-    config = get_ai_config(db)
-
-    if not config["ai_api_key"]:
-        logger.info("vision_master: no API key configured -> INR heuristic")
-        return heuristic_analyze(
-            image_urls, title=title, description=description, condition=condition
-        )
-
-    prompt = ANALYSIS_PROMPT
+    hint = ""
     if title or description or condition:
         hint = "\n\nSELLER HINTS (use, but trust the photos over them):"
         if title:
@@ -766,31 +915,63 @@ def analyze_listing_images(
             hint += f"\n* seller description: {description}"
         if condition:
             hint += f"\n* seller-declared condition: {condition}"
-        prompt += hint
+
+    keys = key_pool_engine.select_ordered_keys(db, "vision")
+    if not keys:
+        logger.info("vision_master: no vision key configured -> INR heuristic")
+        return heuristic_analyze(
+            image_urls, title=title, description=description, condition=condition
+        )
 
     try:
         images = _gather_images(image_urls)
-        raw_text = _invoke_vision_llm(config, prompt, images)
-        raw = _extract_json(raw_text)
-        return _normalize_analysis(
-            raw,
-            provider=config["ai_provider"],
-            model=config["ai_model"],
-            image_urls=image_urls,
-        )
-    except Exception as exc:  # noqa: BLE001 - upstream -> deterministic fallback
-        logger.exception(
-            "vision_master: %s vision call failed; using INR heuristic",
-            config["ai_provider"],
-        )
+    except Exception:  # noqa: BLE001 - photos unreadable -> deterministic plan B
+        logger.exception("vision_master: could not fetch listing photos")
         result = heuristic_analyze(
             image_urls, title=title, description=description, condition=condition
         )
         result["condition_notes"] = (
-            f"{config['ai_provider']} vision error ({exc.__class__.__name__}); "
+            "The listing photos could not be fetched for online analysis, so "
+            "this estimate came from the offline pricing engine. "
             f"{result['condition_notes']}"
         )[:2000]
         return result
+
+    prompt = ANALYSIS_PROMPT + hint
+    for key in keys:
+        config = key_pool_engine.build_provider_config(key)
+        started = time.monotonic()
+        try:
+            raw_text, model_used = _invoke_vision_llm(config, prompt, images)
+            key_pool_engine.mark_success(
+                key.id, latency_ms=(time.monotonic() - started) * 1000
+            )
+            return _normalize_analysis(
+                _extract_json(raw_text),
+                provider=key.provider,
+                model=model_used,
+                image_urls=image_urls,
+            )
+        except Exception as exc:  # noqa: BLE001 - try the next pool key
+            key_pool_engine.mark_failure(key.id, exc)
+            logger.warning(
+                "vision_master: key %s (%s/%s) failed: %s; next key",
+                key.id,
+                key.provider,
+                key.model,
+                exc,
+            )
+
+    logger.error("vision_master: all %d vision keys failed -> INR heuristic", len(keys))
+    result = heuristic_analyze(
+        image_urls, title=title, description=description, condition=condition
+    )
+    result["condition_notes"] = (
+        "Every configured Vision AI key is temporarily unavailable or rate "
+        "limited, so this estimate came from the offline pricing engine. "
+        f"{result['condition_notes']}"
+    )[:2000]
+    return result
 
 
 def chat_completion(
@@ -800,15 +981,77 @@ def chat_completion(
     history: list[dict[str, Any]],
     user_message: str,
     temperature: float = 0.5,
+    image_url: str | None = None,
 ) -> str:
-    """Text completion for the Ask CampusMart AI assistant.
+    """Chat completion for the Ask CampusMart AI assistant.
 
-    Raises when no key is configured or the provider fails - callers fall back
-    to the local catalog assistant.
+    `image_url` (optional) attaches ONE student photo so the assistant can
+    inspect it (recognize the item, spot wear, suggest a campus price).
+
+    Attempts every eligible pool key in routing order; raises only when the
+    pool is empty or every key failed - callers then fall back to the local
+    catalog assistant.
     """
-    config = get_ai_config(db)
-    if not config["ai_api_key"]:
+    keys = key_pool_engine.select_ordered_keys(db, "chat")
+    if not keys:
         raise RuntimeError("No AI API key configured")
+
+    images: list[dict[str, Any]] = []
+    if image_url:
+        try:
+            images = _gather_images([image_url])
+        except Exception:  # noqa: BLE001 - answer with text rather than fail
+            logger.warning(
+                "vision_master: could not fetch chat photo %s; "
+                "answering without it",
+                image_url,
+            )
+
+    last_exc: Exception | None = None
+    for key in keys:
+        config = key_pool_engine.build_provider_config(key)
+        started = time.monotonic()
+        try:
+            text, _model = _invoke_text_llm(
+                config,
+                system,
+                history,
+                user_message,
+                temperature=temperature,
+                images=images,
+            )
+            key_pool_engine.mark_success(
+                key.id, latency_ms=(time.monotonic() - started) * 1000
+            )
+            return text
+        except Exception as exc:  # noqa: BLE001 - try the next pool key
+            key_pool_engine.mark_failure(key.id, exc)
+            last_exc = exc
+            logger.warning(
+                "vision_master: chat key %s (%s/%s) failed: %s; next key",
+                key.id,
+                key.provider,
+                key.model,
+                exc,
+            )
+
+    raise last_exc or RuntimeError("All AI keys failed")
+
+
+def probe_key(
+    config: dict[str, str],
+    *,
+    prompt: str = "Reply with exactly: CampusMart AI online",
+) -> tuple[str, str]:
+    """One-shot connectivity probe for POST /admin/ai-config/test-key.
+
+    Returns `(preview_text, model_used)`. Raises the provider error on
+    failure so the endpoint can report it verbatim.
+    """
     return _invoke_text_llm(
-        config, system, history, user_message, temperature=temperature
+        config,
+        "You are a connectivity probe for CampusMart AI.",
+        [],
+        prompt,
+        temperature=0.0,
     )

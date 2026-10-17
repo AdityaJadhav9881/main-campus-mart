@@ -2,19 +2,29 @@
 schema_upgrade.py
 =================
 Best-effort live-database migrator for CampusMart AI (Phase 7 + production
-multi-angle upgrade).
+multi-angle upgrade + college network / order-handover release).
 
 `Base.metadata.create_all` only creates MISSING tables — it never ALTERs an
 existing table. On a live Render/Neon Postgres that was provisioned before the
 current release, this module adds missing columns idempotently with
 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (PostgreSQL-only) and creates the
-brand-new tables (`system_config`, `chat_messages`) with `checkfirst=True`.
+brand-new tables (`system_config`, `chat_messages`, `email_otps`,
+`action_otps`, `ai_chat_sessions`, `ai_chat_messages`, `notifications`,
+`cart_items`) with `checkfirst=True`.
 
 Covered by this file:
     Phase 7 columns : users.status, users.password_hash, products.trust_reason
     Upgrade columns : products.image_urls (JSON), products.ai_tags,
                       products.ai_condition_notes, chat_messages.read_at
-    New tables      : system_config, chat_messages, email_otps
+    College network : users.college_name/code, products.college_name/code,
+                      email_otps.college_name/code
+    Order handover  : transactions.delivery_address/hostel_or_landmark/
+                      contact_phone/payment_method/upi_reference/order_notes/
+                      otp_code/order_status
+    College search  : college_directory (AI/web-discovered colleges cache)
+    New tables      : system_config, chat_messages, email_otps, action_otps,
+                      ai_chat_sessions, ai_chat_messages, notifications,
+                      cart_items, college_directory
 
 This is a stopgap until Alembic migrations land (see README roadmap).
 SQLite (test harnesses) always builds a fresh schema via create_all, so the
@@ -27,7 +37,17 @@ import logging
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from .models import ChatMessage, EmailOTP, SystemConfig
+from .models import (
+    ActionOTP,
+    AiChatMessage,
+    AiChatSession,
+    CartItem,
+    ChatMessage,
+    CollegeDirectory,
+    EmailOTP,
+    Notification,
+    SystemConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +64,39 @@ _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("products", "ai_condition_notes", "TEXT"),
     # Unread badge support for the Messages tab (NULL = unread).
     ("chat_messages", "read_at", "TIMESTAMP WITH TIME ZONE"),
+    # WhatsApp-style photo messages (Cloudinary URL, nullable).
+    ("chat_messages", "image_url", "TEXT"),
+    # --- College network ------------------------------------------------------
+    ("users", "college_name", "VARCHAR(255)"),
+    ("users", "college_code", "VARCHAR(16)"),
+    ("products", "college_name", "VARCHAR(255)"),
+    ("products", "college_code", "VARCHAR(16)"),
+    ("email_otps", "college_name", "VARCHAR(255)"),
+    ("email_otps", "college_code", "VARCHAR(16)"),
+    # --- Structured checkout (order handover) ---------------------------------
+    ("transactions", "delivery_address", "VARCHAR(400)"),
+    ("transactions", "hostel_or_landmark", "VARCHAR(200)"),
+    ("transactions", "contact_phone", "VARCHAR(20)"),
+    ("transactions", "payment_method", "VARCHAR(30)"),
+    ("transactions", "upi_reference", "VARCHAR(120)"),
+    ("transactions", "order_notes", "TEXT"),
+    ("transactions", "otp_code", "VARCHAR(8)"),
+    ("transactions", "order_status", "VARCHAR(40) DEFAULT 'Requested / Processing'"),
 )
 
 # Brand-new tables that older databases predate. `create_all` covers them on
 # a fresh boot; this loop covers "run schema_upgrade against the live DB".
-_NEW_TABLES = (SystemConfig.__table__, ChatMessage.__table__, EmailOTP.__table__)
+_NEW_TABLES = (
+    SystemConfig.__table__,
+    ChatMessage.__table__,
+    EmailOTP.__table__,
+    ActionOTP.__table__,
+    AiChatSession.__table__,
+    AiChatMessage.__table__,
+    Notification.__table__,
+    CartItem.__table__,
+    CollegeDirectory.__table__,
+)
 
 
 def upgrade_schema(engine: Engine) -> None:

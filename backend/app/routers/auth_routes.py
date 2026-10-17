@@ -29,20 +29,25 @@ from sqlalchemy.orm import Session
 from ..auth import (
     account_terminated,
     create_access_token,
+    get_or_create_current_user,
     hash_password,
+    verify_firebase_token,
     verify_password,
 )
 from ..database import get_db
-from ..email_service import send_otp_email
-from ..models import EmailOTP, User
+from ..email_service import send_action_otp_email, send_otp_email
+from ..models import ActionOTP, EmailOTP, User
 from ..schemas import (
+    ActionOtpVerifiedResponse,
     LoginRequest,
     OtpSentResponse,
     RegisterRequest,
     ResendOtpRequest,
+    SendActionOtpRequest,
     SendOtpRequest,
     TokenResponse,
     UserRead,
+    VerifyActionOtpRequest,
     VerifyOtpRequest,
 )
 
@@ -98,6 +103,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
         password_hash=hash_password(payload.password),
         status="active",
         trust_score=5.0,
+        college_name=(payload.college_name or "").strip() or None,
+        college_code=(payload.college_code or "").strip() or None,
     )
     db.add(user)
     db.commit()
@@ -177,6 +184,8 @@ def send_otp(payload: SendOtpRequest, db: Session = Depends(get_db)) -> OtpSentR
     otp_code = _generate_otp()
     password_hash = hash_password(payload.password)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
+    college_name = (payload.college_name or "").strip() or None
+    college_code = (payload.college_code or "").strip() or None
 
     # One pending row per email: resend/overwrite instead of stacking rows.
     row = db.query(EmailOTP).filter(EmailOTP.email == email).first()
@@ -186,6 +195,8 @@ def send_otp(payload: SendOtpRequest, db: Session = Depends(get_db)) -> OtpSentR
             otp_code=otp_code,
             name=name,
             password_hash=password_hash,
+            college_name=college_name,
+            college_code=college_code,
             expires_at=expires_at,
         )
         db.add(row)
@@ -193,6 +204,8 @@ def send_otp(payload: SendOtpRequest, db: Session = Depends(get_db)) -> OtpSentR
         row.otp_code = otp_code
         row.name = name
         row.password_hash = password_hash
+        row.college_name = college_name
+        row.college_code = college_code
         row.expires_at = expires_at
     db.commit()
 
@@ -263,6 +276,8 @@ def verify_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)) -> Toke
         password_hash=row.password_hash,
         status="active",
         trust_score=5.0,
+        college_name=row.college_name,
+        college_code=row.college_code,
     )
     db.add(user)
     try:
@@ -314,4 +329,129 @@ def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)) -> OtpS
         email=email,
         email_delivered=delivered,
         fallback_otp_code=None if delivered else row.otp_code,
+    )
+
+
+# =============================================================================
+# Action OTP - verify before publishing a listing / placing an order
+# =============================================================================
+@router.post(
+    "/send-action-otp",
+    response_model=OtpSentResponse,
+    summary="Email a 6-digit code that authorises a sell/purchase action",
+)
+def send_action_otp(
+    payload: SendActionOtpRequest,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> OtpSentResponse:
+    """Mint + email an action code for the LOGGED-IN student.
+
+    Called right before:
+        * "Publish Listing"  (action_type='sell')
+        * "Place Order"      (action_type='purchase')
+    The code (10-minute TTL) is stored on `action_otps` keyed by
+    (email, action_type); requesting again simply rotates it.
+    """
+    user = get_or_create_current_user(db, token)
+    email = user.email
+
+    otp_code = _generate_otp()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
+
+    # Replace any pending code for this action (resend = fresh code).
+    db.query(ActionOTP).filter(
+        ActionOTP.email == email,
+        ActionOTP.action_type == payload.action_type,
+    ).delete(synchronize_session=False)
+    row = ActionOTP(
+        email=email,
+        otp_code=otp_code,
+        action_type=payload.action_type,
+        item_title=(payload.item_title or "").strip()[:200] or None,
+        expires_at=expires_at,
+        verified=False,
+    )
+    db.add(row)
+    db.commit()
+
+    delivered = send_action_otp_email(
+        email,
+        user.name,
+        otp_code,
+        action_type=payload.action_type,
+        item_title=row.item_title,
+    )
+    logger.info(
+        "Action OTP issued for %s (%s, delivered=%s)",
+        email, payload.action_type, delivered,
+    )
+    return OtpSentResponse(
+        message="Verification code sent to your email",
+        email=email,
+        email_delivered=delivered,
+        fallback_otp_code=None if delivered else otp_code,
+    )
+
+
+@router.post(
+    "/verify-action-otp",
+    response_model=ActionOtpVerifiedResponse,
+    summary="Verify the action code and mint a one-shot action token",
+)
+def verify_action_otp(
+    payload: VerifyActionOtpRequest,
+    token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> ActionOtpVerifiedResponse:
+    """Check the 6-digit action code for the logged-in student.
+
+    On success the row is marked verified and an opaque `action_token` is
+    minted. The client then proceeds with the publish/purchase call; the
+    token (or the raw code) is accepted there as proof of verification.
+    """
+    user = get_or_create_current_user(db, token)
+    email = user.email
+
+    row = (
+        db.query(ActionOTP)
+        .filter(
+            ActionOTP.email == email,
+            ActionOTP.action_type == payload.action_type,
+        )
+        .order_by(ActionOTP.created_at.desc())
+        .first()
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No verification code found for this action. Request a new one.",
+        )
+
+    expires_at = row.expires_at
+    if expires_at.tzinfo is None:  # SQLite returns naive datetimes
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        db.delete(row)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code expired. Request a new one.",
+        )
+
+    if not secrets.compare_digest(row.otp_code, payload.otp_code.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification code. Check the email and try again.",
+        )
+
+    row.verified = True
+    row.action_token = secrets.token_urlsafe(24)
+    db.commit()
+
+    logger.info("Action OTP verified for %s (%s)", email, payload.action_type)
+    return ActionOtpVerifiedResponse(
+        verified=True,
+        action_type=payload.action_type,
+        action_token=row.action_token,
     )

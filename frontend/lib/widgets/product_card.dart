@@ -75,6 +75,12 @@ class ProductCard extends StatelessWidget {
                       left: 8,
                       child: _DiscountBadge(percent: discount),
                     ),
+                  if (product.collegeBadge != null)
+                    Positioned(
+                      left: 8,
+                      bottom: 8,
+                      child: _CollegeBadge(label: product.collegeBadge!),
+                    ),
                   Positioned(top: 6, right: 6, child: _WishlistButton(
                     productId: product.id,
                     saved: saved,
@@ -169,6 +175,47 @@ class _DiscountBadge extends StatelessWidget {
           fontWeight: FontWeight.w900,
           letterSpacing: 0.3,
         ),
+      ),
+    );
+  }
+}
+
+/// Campus-network badge painted over the photo bottom-left ("🎓 COEP").
+/// Only rendered when the listing carries a college (Task 3).
+class _CollegeBadge extends StatelessWidget {
+  const _CollegeBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.58),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.school, size: 10, color: Colors.white),
+          const SizedBox(width: 4),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 108),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 8.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

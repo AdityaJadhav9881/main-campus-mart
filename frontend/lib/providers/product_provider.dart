@@ -23,6 +23,7 @@ class ProductProvider extends ChangeNotifier {
   /// Last server-side search filters (kept so pull-to-refresh re-applies them).
   String _lastQuery = '';
   String _lastCategory = '';
+  String _lastCollege = '';
 
   List<Product> get products => _products;
   bool get isLoading => _isLoading;
@@ -37,14 +38,20 @@ class ProductProvider extends ChangeNotifier {
   /// GET /products/ - first load and pull-to-refresh.
   ///
   /// Optional server-side filters (Discover search bar + category chips):
-  /// [query] maps to `?q=` (title/description/category/tag match) and
-  /// [category] to `?category=`. Omit a parameter to reuse the previous
-  /// value; pass an empty string to clear it. Existing items stay visible
-  /// during a refresh; the full-screen loader only appears when there is
-  /// nothing to show yet.
-  Future<void> loadProducts({String? query, String? category}) async {
+  /// [query] maps to `?q=` (title/description/category/tag match),
+  /// [category] to `?category=` and [college] to `?college=` (the
+  /// "🎓 My College" campus-network toggle). Omit a parameter to reuse the
+  /// previous value; pass an empty string to clear it. Existing items stay
+  /// visible during a refresh; the full-screen loader only appears when
+  /// there is nothing to show yet.
+  Future<void> loadProducts({
+    String? query,
+    String? category,
+    String? college,
+  }) async {
     if (query != null) _lastQuery = query.trim();
     if (category != null) _lastCategory = category.trim();
+    if (college != null) _lastCollege = college.trim();
     _isLoading = true;
     _errorMessage = null;
     notifyListeners();
@@ -52,6 +59,7 @@ class ProductProvider extends ChangeNotifier {
       _products = await _api.fetchActiveProducts(
         query: _lastQuery.isEmpty ? null : _lastQuery,
         category: _lastCategory.isEmpty ? null : _lastCategory,
+        college: _lastCollege.isEmpty ? null : _lastCollege,
       );
     } on ApiException catch (error) {
       _errorMessage = error.message;

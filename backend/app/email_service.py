@@ -298,6 +298,71 @@ def send_otp_email(to_email: str, name: str, otp_code: str) -> bool:
 
 
 # =============================================================================
+# 1b. Action OTP (verify before publish / purchase)
+# =============================================================================
+def send_action_otp_email(
+    to_email: str,
+    name: str,
+    otp_code: str,
+    action_type: str = "purchase",
+    item_title: str | None = None,
+) -> bool:
+    """Send the 6-digit code that authorises a sensitive action.
+
+    action_type: 'sell'     -> publishing a listing
+                 'purchase' -> placing an order
+    item_title : optional headline shown in the email ("Bose QC35 II").
+    """
+    action_label = "Sell" if action_type == "sell" else "Purchase"
+    action_phrase = (
+        "publish your listing"
+        if action_type == "sell"
+        else "place your order"
+    )
+    item_line = (
+        f'<p style="margin:0 0 18px 0; color:{_TEXT}; font-size:14px; '
+        f'font-weight:600;">Item: {item_title}</p>'
+        if item_title
+        else ""
+    )
+    subject = f"Your Campus Mart AI {action_label} Verification Code: {otp_code}"
+    body = f"""
+      <p style="margin:0 0 14px 0; color:{_TEXT}; font-size:14px;">
+        Hi {name},
+      </p>
+      <p style="margin:0 0 10px 0; color:{_MUTED}; font-size:14px;
+                line-height:1.6;">
+        Use this code to confirm your identity and {action_phrase} on
+        Campus Mart Ai:
+      </p>
+      {item_line}
+      <div style="text-align:center; margin:22px 0;">
+        <span style="display:inline-block; letter-spacing:10px;
+                     font-size:34px; font-weight:800; color:{_BRAND};
+                     background:{_BRAND}14; border:2px dashed {_BRAND};
+                     border-radius:14px; padding:16px 18px 16px 28px;">
+          {otp_code}
+        </span>
+      </div>
+      <p style="margin:6px 0 0 0; color:{_WARN}; font-size:13px;
+                font-weight:600; text-align:center;">
+        Valid for 10 minutes only.
+      </p>
+      <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
+                line-height:1.6; text-align:center;">
+        Never share this code with anyone - Campus Mart Ai staff will
+        never ask for it.
+      </p>
+    """
+    heading = (
+        "Confirm: publish your listing"
+        if action_type == "sell"
+        else "Confirm: place your order"
+    )
+    return _send_email(to_email, subject, _shell(heading, body))
+
+
+# =============================================================================
 # 2. Listing published confirmation
 # =============================================================================
 def send_listing_published_email(

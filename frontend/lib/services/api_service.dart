@@ -7,7 +7,10 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' show MediaType;
 
 import '../models/ai_analysis.dart';
+import '../models/cart_models.dart';
 import '../models/chat_models.dart';
+import '../models/college.dart';
+import '../models/notification_item.dart';
 import '../models/product.dart';
 import '../models/user_profile.dart';
 
@@ -250,9 +253,12 @@ class ApiService {
   /// Optional server-side search (added for the Discover search bar):
   ///  * [query]  -> `?q=` title/description/category/tag ILIKE match.
   ///  * [category] -> `?category=` exact category filter (skip "All").
+  ///  * [college] -> `?college=` exact campus filter for the "🎓 My College"
+  ///    network toggle.
   Future<List<Product>> fetchActiveProducts({
     String? query,
     String? category,
+    String? college,
   }) async {
     final params = <String, String>{};
     final trimmedQuery = query?.trim() ?? '';
@@ -261,6 +267,8 @@ class ApiService {
     if (trimmedCategory.isNotEmpty && trimmedCategory != 'All') {
       params['category'] = trimmedCategory;
     }
+    final trimmedCollege = college?.trim() ?? '';
+    if (trimmedCollege.isNotEmpty) params['college'] = trimmedCollege;
     final path = params.isEmpty
         ? '/products/'
         : '/products/?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
@@ -271,6 +279,15 @@ class ApiService {
         .map((dynamic item) =>
             Product.fromJson(item! as Map<String, dynamic>))
         .toList();
+  }
+
+  /// GET /products/{product_id} - single listing (bell-notification deep
+  /// links). Returns null when the listing no longer exists.
+  Future<Product?> fetchProductById(String productId) async {
+    final response = await _get('/products/$productId');
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) throw _apiError(response);
+    return Product.fromJson(_decodeMap(response));
   }
 
   /// POST /products/analyze-images - the 4-angle Vision AI inspection.
@@ -458,10 +475,15 @@ class ApiService {
   // ---------------------------------------------------------------------------
 
   /// POST /auth/register - create a student account, returns JWT + profile.
+  ///
+  /// [collegeName]/[collegeCode] carry the CET college picked in the Sign Up
+  /// sheet (required by the UI; optional server-side for older clients).
   Future<AuthSession> register({
     required String name,
     required String email,
     required String password,
+    String? collegeName,
+    String? collegeCode,
   }) async {
     final response = await _post(
       '/auth/register',
@@ -469,6 +491,10 @@ class ApiService {
         'name': name,
         'email': email,
         'password': password,
+        if (collegeName != null && collegeName.trim().isNotEmpty)
+          'college_name': collegeName.trim(),
+        if (collegeCode != null && collegeCode.trim().isNotEmpty)
+          'college_code': collegeCode.trim(),
       },
     );
     if (response.statusCode != 201) throw _apiError(response);
@@ -489,13 +515,37 @@ class ApiService {
   }
 
   /// POST /products/{product_id}/purchase - buy/reserve an active listing.
+  ///
+  /// The 4-step checkout sheet passes the optional handover details; quick-buy
+  /// callers send nothing and the order still goes through.
   Future<PurchaseResult> purchaseProduct({
     required String productId,
     required String token,
+    String? deliveryAddress,
+    String? hostelOrLandmark,
+    String? contactPhone,
+    String? paymentMethod,
+    String? upiReference,
+    String? otpCode,
+    String? notes,
   }) async {
     final response = await _post(
       '/products/$productId/purchase',
-      body: const <String, dynamic>{},
+      body: <String, dynamic>{
+        if (deliveryAddress != null && deliveryAddress.trim().isNotEmpty)
+          'delivery_address': deliveryAddress.trim(),
+        if (hostelOrLandmark != null && hostelOrLandmark.trim().isNotEmpty)
+          'hostel_or_landmark': hostelOrLandmark.trim(),
+        if (contactPhone != null && contactPhone.trim().isNotEmpty)
+          'contact_phone': contactPhone.trim(),
+        if (paymentMethod != null && paymentMethod.trim().isNotEmpty)
+          'payment_method': paymentMethod.trim(),
+        if (upiReference != null && upiReference.trim().isNotEmpty)
+          'upi_reference': upiReference.trim(),
+        if (otpCode != null && otpCode.trim().isNotEmpty)
+          'otp_code': otpCode.trim(),
+        if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
+      },
       token: token,
     );
     if (response.statusCode != 200) throw _apiError(response);
@@ -533,6 +583,8 @@ class ApiService {
     required String name,
     required String email,
     required String password,
+    String? collegeName,
+    String? collegeCode,
   }) async {
     final response = await _post(
       '/auth/send-otp',
@@ -540,6 +592,10 @@ class ApiService {
         'name': name.trim(),
         'email': email.trim(),
         'password': password,
+        if (collegeName != null && collegeName.trim().isNotEmpty)
+          'college_name': collegeName.trim(),
+        if (collegeCode != null && collegeCode.trim().isNotEmpty)
+          'college_code': collegeCode.trim(),
       },
     );
     if (response.statusCode != 200) throw _apiError(response);
@@ -575,11 +631,15 @@ class ApiService {
   // ---------------------------------------------------------------------------
 
   /// POST /chats/messages - send one message on a product thread (201).
+  ///
+  /// [imageUrl] attaches a photo (already uploaded via [uploadListingImage])
+  /// WhatsApp-style; the text [message] may be empty for a photo-only send.
   Future<ChatMessage> sendMessage({
     required String productId,
     required String receiverId,
     required String message,
     required String token,
+    String? imageUrl,
   }) async {
     final response = await _post(
       '/chats/messages',
@@ -587,6 +647,8 @@ class ApiService {
         'product_id': productId,
         'receiver_id': receiverId,
         'message': message,
+        if (imageUrl != null && imageUrl.trim().isNotEmpty)
+          'image_url': imageUrl.trim(),
       },
       token: token,
     );
@@ -625,22 +687,275 @@ class ApiService {
 
   /// POST /ai/chat - Ask CampusMart AI. Falls back to the catalog-aware
   /// local assistant (source='catalog') when no live LLM is configured.
+  ///
+  /// [imageUrl] attaches one photo (already uploaded via [uploadListingImage])
+  /// so the assistant can inspect it; [message] may be empty then.
+  /// [sessionId] appends the turn to a saved conversation; the response then
+  /// carries the session id + (auto) title for the history drawer.
   Future<AiChatReply> askAi({
     required String message,
     List<AiChatTurn> history = const <AiChatTurn>[],
     String? token,
+    String? imageUrl,
+    String? sessionId,
   }) async {
     final response = await _post(
       '/ai/chat',
       body: <String, dynamic>{
         'message': message,
         'history': history.map((turn) => turn.toJson()).toList(),
+        if (imageUrl != null && imageUrl.trim().isNotEmpty)
+          'image_url': imageUrl.trim(),
+        if (sessionId != null && sessionId.trim().isNotEmpty)
+          'session_id': sessionId.trim(),
       },
       token: token,
     );
     if (response.statusCode != 200) throw _apiError(response);
     return AiChatReply.fromJson(_decodeMap(response));
   }
+
+  // ---------------------------------------------------------------------------
+  // College network - CET Cell directory + custom colleges
+  // ---------------------------------------------------------------------------
+
+  /// GET /colleges?q=&city=&allow_custom= - ranked CET college search for the
+  /// picker sheet. [allowCustom] echoes unmatched typed text back as a
+  /// pickable "custom college" entry so unlisted institutes can sign up.
+  Future<CollegeSearchResult> searchColleges({
+    String q = '',
+    String city = '',
+    bool allowCustom = false,
+  }) async {
+    final params = <String, String>{
+      if (q.trim().isNotEmpty) 'q': q.trim(),
+      if (city.trim().isNotEmpty && city.trim() != 'All') 'city': city.trim(),
+      if (allowCustom) 'allow_custom': 'true',
+    };
+    final path = params.isEmpty
+        ? '/colleges'
+        : '/colleges?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
+    final response = await _get(path);
+    if (response.statusCode != 200) throw _apiError(response);
+    return CollegeSearchResult.fromJson(_decodeMap(response));
+  }
+
+  /// PATCH /users/me - update my profile college (Profile tab editor).
+  Future<UserProfile> updateMyCollege({
+    required String token,
+    String? collegeName,
+    String? collegeCode,
+  }) async {
+    final response = await _send(
+      'PATCH',
+      '/users/me',
+      body: <String, dynamic>{
+        'college_name': (collegeName ?? '').trim(),
+        'college_code': (collegeCode ?? '').trim(),
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return UserProfile.fromJson(_decodeMap(response));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Action OTP (verify before publish / purchase)
+  // ---------------------------------------------------------------------------
+
+  /// POST /auth/send-action-otp - email a 6-digit code for a sell/purchase.
+  /// Offline-safe: when Brevo is unkeyed the response carries
+  /// `fallback_otp_code` which the sheet shows for instant verification.
+  Future<Map<String, dynamic>> sendActionOtp({
+    required String actionType, // 'sell' | 'purchase'
+    required String token,
+    String? itemTitle,
+  }) async {
+    final response = await _post(
+      '/auth/send-action-otp',
+      body: <String, dynamic>{
+        'action_type': actionType,
+        if (itemTitle != null && itemTitle.trim().isNotEmpty)
+          'item_title': itemTitle.trim(),
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
+  }
+
+  /// POST /auth/verify-action-otp - validate the code, mint an action token.
+  Future<ActionOtpResult> verifyActionOtp({
+    required String otpCode,
+    required String token,
+    String actionType = 'purchase',
+  }) async {
+    final response = await _post(
+      '/auth/verify-action-otp',
+      body: <String, dynamic>{
+        'otp_code': otpCode.trim(),
+        'action_type': actionType,
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    final body = _decodeMap(response);
+    return ActionOtpResult(
+      verified: body['verified'] == true,
+      actionToken: body['action_token']?.toString() ?? '',
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notifications (bell icon)
+  // ---------------------------------------------------------------------------
+
+  /// GET /notifications/ - newest-first feed + unread badge count.
+  Future<NotificationFeed> fetchNotifications({required String token}) async {
+    final response = await _get('/notifications/', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return NotificationFeed.fromJson(_decodeMap(response));
+  }
+
+  /// POST /notifications/{id}/read - mark one alert as read.
+  Future<void> markNotificationRead({
+    required String notificationId,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/notifications/$notificationId/read',
+      body: const <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+  }
+
+  /// POST /notifications/read-all - clear the unread badge.
+  Future<void> markAllNotificationsRead({required String token}) async {
+    final response = await _post(
+      '/notifications/read-all',
+      body: const <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cart
+  // ---------------------------------------------------------------------------
+
+  /// GET /cart/ - my cart with full product cards + ₹ total.
+  Future<CartSummary> fetchCart({required String token}) async {
+    final response = await _get('/cart/', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return CartSummary.fromJson(_decodeMap(response));
+  }
+
+  /// POST /cart/{product_id} - park a listing in the cart (idempotent).
+  Future<CartSummary> addToCart({
+    required String productId,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/cart/$productId',
+      body: const <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 201) throw _apiError(response);
+    return CartSummary.fromJson(_decodeMap(response));
+  }
+
+  /// DELETE /cart/{product_id} - remove one listing (idempotent).
+  Future<CartSummary> removeFromCart({
+    required String productId,
+    required String token,
+  }) async {
+    final response = await _delete('/cart/$productId', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return CartSummary.fromJson(_decodeMap(response));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ask-AI saved sessions (history drawer)
+  // ---------------------------------------------------------------------------
+
+  /// GET /ai/sessions - my saved conversations, newest first.
+  Future<List<AiSession>> fetchAiSessions({required String token}) async {
+    final response = await _get('/ai/sessions', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeList(response)
+        .whereType<Map<String, dynamic>>()
+        .map(AiSession.fromJson)
+        .toList(growable: false);
+  }
+
+  /// POST /ai/sessions - start a fresh conversation row.
+  Future<AiSession> createAiSession({required String token}) async {
+    final response = await _post(
+      '/ai/sessions',
+      body: const <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 201) throw _apiError(response);
+    return AiSession.fromJson(_decodeMap(response));
+  }
+
+  /// GET /ai/sessions/{id} - full transcript for replay.
+  Future<AiSessionDetail> fetchAiSession({
+    required String sessionId,
+    required String token,
+  }) async {
+    final response = await _get('/ai/sessions/$sessionId', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return AiSessionDetail.fromJson(_decodeMap(response));
+  }
+
+  /// DELETE /ai/sessions/{id} - remove a saved conversation.
+  Future<void> deleteAiSession({
+    required String sessionId,
+    required String token,
+  }) async {
+    final response = await _delete('/ai/sessions/$sessionId', token: token);
+    if (response.statusCode != 204 && response.statusCode != 200) {
+      throw _apiError(response);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-app calls
+  // ---------------------------------------------------------------------------
+
+  /// POST /chats/call-event - log a finished call into the product thread.
+  Future<ChatMessage> recordCallEvent({
+    required String productId,
+    required String receiverId,
+    required String callType, // 'voice' | 'video'
+    required String token,
+    String status = 'completed',
+    int durationSeconds = 0,
+  }) async {
+    final response = await _post(
+      '/chats/call-event',
+      body: <String, dynamic>{
+        'product_id': productId,
+        'receiver_id': receiverId,
+        'call_type': callType,
+        'status': status,
+        'duration_seconds': durationSeconds,
+      },
+      token: token,
+    );
+    if (response.statusCode != 201) throw _apiError(response);
+    return ChatMessage.fromJson(_decodeMap(response));
+  }
+}
+
+/// Result of POST /auth/verify-action-otp (proof of email verification).
+class ActionOtpResult {
+  const ActionOtpResult({required this.verified, required this.actionToken});
+
+  final bool verified;
+  final String actionToken;
 }
 
 /// JWT + profile payload returned by /auth/register and /auth/login.
@@ -667,14 +982,25 @@ class PurchaseResult {
     required this.productId,
     required this.finalPrice,
     required this.productStatus,
+    this.sellerId,
+    this.sellerName,
+    this.orderStatus = 'Requested / Processing',
+    this.autoChatMessageId,
   });
 
   factory PurchaseResult.fromJson(Map<String, dynamic> json) {
+    final sellerId = json['seller_id']?.toString();
+    final chatId = json['auto_chat_message_id']?.toString();
     return PurchaseResult(
       transactionId: json['transaction_id']?.toString() ?? '',
       productId: json['product_id']?.toString() ?? '',
       finalPrice: (json['final_price'] as num?)?.toDouble() ?? 0,
       productStatus: json['product_status']?.toString() ?? 'sold',
+      sellerId: (sellerId == null || sellerId.isEmpty) ? null : sellerId,
+      sellerName: json['seller_name']?.toString(),
+      orderStatus:
+          json['order_status']?.toString() ?? 'Requested / Processing',
+      autoChatMessageId: (chatId == null || chatId.isEmpty) ? null : chatId,
     );
   }
 
@@ -682,6 +1008,16 @@ class PurchaseResult {
   final String productId;
   final double finalPrice;
   final String productStatus;
+
+  /// Seller identity for the success sheet ("💬 Open Chat with Seller").
+  final String? sellerId;
+  final String? sellerName;
+
+  /// Fulfilment headline ("Requested / Processing").
+  final String orderStatus;
+
+  /// Order Card auto-message posted into the buyer→seller thread.
+  final String? autoChatMessageId;
 }
 
 /// One row of GET /transactions/my (mirrors the backend `TransactionRead`).
@@ -698,6 +1034,11 @@ class TransactionRecord {
     this.productStatus,
     this.buyerName,
     this.sellerName,
+    this.orderStatus,
+    this.paymentMethod,
+    this.hostelOrLandmark,
+    this.deliveryAddress,
+    this.contactPhone,
   });
 
   factory TransactionRecord.fromJson(Map<String, dynamic> json) {
@@ -714,6 +1055,11 @@ class TransactionRecord {
       productStatus: json['product_status']?.toString(),
       buyerName: json['buyer_name']?.toString(),
       sellerName: json['seller_name']?.toString(),
+      orderStatus: json['order_status']?.toString(),
+      paymentMethod: json['payment_method']?.toString(),
+      hostelOrLandmark: json['hostel_or_landmark']?.toString(),
+      deliveryAddress: json['delivery_address']?.toString(),
+      contactPhone: json['contact_phone']?.toString(),
     );
   }
 
@@ -728,6 +1074,14 @@ class TransactionRecord {
   final String? productStatus;
   final String? buyerName;
   final String? sellerName;
+
+  /// Structured checkout context for the Orders screen ("Requested /
+  /// Processing", payment chip, meetup landmark).
+  final String? orderStatus;
+  final String? paymentMethod;
+  final String? hostelOrLandmark;
+  final String? deliveryAddress;
+  final String? contactPhone;
 }
 
 /// Response body of GET /transactions/my: bought + sold history.

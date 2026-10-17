@@ -5,11 +5,18 @@ SQLAlchemy ORM schema definitions for CampusMart AI (Phase 1).
 
 Tables
 ------
-users          : Student accounts hydrated from Firebase Auth.
-products       : Second-hand items listed by sellers on the marketplace.
-transactions   : Purchase records linking a buyer to a product.
-system_config  : Runtime settings (AI provider/model/key) owned by the admin.
-chat_messages  : Buyer-seller messages scoped to a product thread.
+users            : Student accounts hydrated from Firebase Auth.
+products         : Second-hand items listed by sellers on the marketplace.
+transactions     : Purchase records linking a buyer to a product.
+system_config    : Runtime settings (AI provider/model/key) owned by the admin.
+chat_messages    : Buyer-seller messages scoped to a product thread.
+email_otps       : Pending signup verification codes.
+action_otps      : Pending verify-before-action codes (sell / purchase).
+ai_chat_sessions : Saved Ask-AI conversations (history drawer).
+ai_chat_messages : Persisted turns inside an Ask-AI conversation.
+notifications    : Bell-icon alerts (college listings, orders, messages...).
+cart_items       : Products parked in a student's cart before checkout.
+college_directory: AI/web-discovered colleges cached outside the CET catalog.
 
 Design notes
 ------------
@@ -29,6 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -36,6 +44,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID  # native PG UUID type
 from sqlalchemy.orm import relationship
@@ -76,6 +85,14 @@ class User(Base):
 
     name = Column(String(120), nullable=False)
     email = Column(String(255), unique=True, nullable=False)
+
+    # --- Maharashtra CET Cell college identity (college network) -------------
+    # Free-text official college name + its 4-digit DTE/CET institute code
+    # (e.g. "COEP Technological University" / "6006"). NULL for accounts that
+    # predate the college network; students pick theirs on Sign Up and can
+    # change it in Profile.
+    college_name = Column(String(255), nullable=True)
+    college_code = Column(String(16), nullable=True)
 
     # --- Live-production auth (Phase 7) --------------------------------------
     # 'active'  -> normal marketplace access
@@ -153,6 +170,13 @@ class Product(Base):
 
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=False)
+
+    # --- College network ------------------------------------------------------
+    # The seller's college at listing time; powers the "My College" Discover
+    # filter and the same-college push notifications. Indexed because
+    # filtering by campus is a primary browse mode.
+    college_name = Column(String(255), nullable=True, index=True)
+    college_code = Column(String(16), nullable=True)
 
     # Free-text category label (e.g. 'textbooks', 'electronics', 'furniture').
     # Indexed because category browsing is a primary marketplace filter.
@@ -332,7 +356,12 @@ class ChatMessage(Base):
         index=True,
     )
 
-    message = Column(Text, nullable=False)
+    message = Column(Text, nullable=False, default="")
+
+    # WhatsApp-style photo messages: Cloudinary URL of the attached photo
+    # (nullable - most messages are text only). A message may be photo-only
+    # (empty string body).
+    image_url = Column(Text, nullable=True)
 
     # Set the first time the receiver opens the thread -> drives the unread
     # badge on the Messages tab (NULL = unread).
@@ -397,6 +426,35 @@ class Transaction(Base):
         server_default="'pending'",  # quoted => valid SQL literal
     )
 
+    # --- Structured checkout (order-handover upgrade) -------------------------
+    # Coordinator/meetup details the buyer fills in the 4-step checkout sheet.
+    # All nullable so pre-upgrade rows and quick legacy purchases stay valid.
+    delivery_address = Column(String(400), nullable=True)
+    hostel_or_landmark = Column(String(200), nullable=True)
+    contact_phone = Column(String(20), nullable=True)
+
+    # 'cash_on_meetup' | 'gpay_upi' (free string for forward compatibility).
+    payment_method = Column(String(30), nullable=True)
+
+    # UPI transaction reference / UTR when payment_method = 'gpay_upi'.
+    upi_reference = Column(String(120), nullable=True)
+
+    # Buyer's pickup/handover notes for the seller.
+    order_notes = Column(Text, nullable=True)
+
+    # Email action-OTP that authorised this purchase (6 digits).
+    otp_code = Column(String(8), nullable=True)
+
+    # Fulfilment state shown as the order card headline:
+    #   'Requested / Processing' -> default at checkout
+    #   'Completed' | 'Cancelled' -> updated during handover
+    order_status = Column(
+        String(40),
+        nullable=False,
+        default="Requested / Processing",
+        server_default="'Requested / Processing'",
+    )
+
     # Named `timestamp` per spec (SQL keyword, but SQLAlchemy quotes it safely).
     timestamp = Column(
         DateTime(timezone=True),
@@ -444,4 +502,281 @@ class EmailOTP(Base):
     name = Column(String(120), nullable=False)
     password_hash = Column(String(128), nullable=False)
 
+    # College network: the CET college picked in the Sign Up sheet travels
+    # with the OTP row so verify-otp can stamp it onto the fresh User.
+    college_name = Column(String(255), nullable=True)
+    college_code = Column(String(16), nullable=True)
+
     expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ActionOTP(Base):
+    """One pending email verification code for a sensitive ACTION.
+
+    Separate from EmailOTP (signup) because the unique-email constraint there
+    would collide with a concurrent signup, and the payload differs:
+
+        POST /auth/send-action-otp   -> create/replace a row per (email, action)
+                                        with a 10-minute expiry.
+        POST /auth/verify-action-otp -> mark verified + mint `action_token`;
+                                        the client then passes the token/otp to
+                                        POST /products/ or /purchase.
+
+    Actions: 'sell' (publish a listing) | 'purchase' (place an order).
+    """
+
+    __tablename__ = "action_otps"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    email = Column(String(255), nullable=False, index=True)
+    otp_code = Column(String(6), nullable=False)
+
+    # 'sell' | 'purchase' (free string for future actions like 'delete').
+    action_type = Column(String(30), nullable=False)
+
+    # Human context shown in the email + verification sheet ("Bose QC35 II").
+    item_title = Column(String(200), nullable=True)
+
+    # Opaque proof handed to the client after a successful verify; routers
+    # accept it in place of the raw code.
+    action_token = Column(String(64), nullable=True)
+
+    verified = Column(Boolean, nullable=False, default=False)
+
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+
+class AiChatSession(Base):
+    """A saved Ask-AI conversation shown in the Gemini-style history drawer.
+
+    One row per conversation; messages cascade with it so "delete chat"
+    wipes the transcript atomically. `title` is auto-derived from the first
+    user prompt (first ~4 meaningful words).
+    """
+
+    __tablename__ = "ai_chat_sessions"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    title = Column(String(200), nullable=False, default="New chat")
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default="now()",
+    )
+
+    messages = relationship(
+        "AiChatMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="AiChatMessage.created_at",
+        lazy="selectin",
+    )
+
+
+class AiChatMessage(Base):
+    """One persisted turn (user or assistant) inside an AiChatSession."""
+
+    __tablename__ = "ai_chat_messages"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("ai_chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # 'user' | 'assistant'
+    role = Column(String(12), nullable=False)
+
+    content = Column(Text, nullable=False, default="")
+
+    # Photo attached to this turn (inspection requests), Cloudinary URL.
+    image_url = Column(Text, nullable=True)
+
+    # JSON array of catalog product UUIDs the assistant recommended, so the
+    # history replay can re-render recommendation cards.
+    matched_products_json = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+    session = relationship("AiChatSession", back_populates="messages")
+
+
+class Notification(Base):
+    """In-app notification for the bell icon + native push mirror.
+
+    Types: 'college_listing' | 'order_placed' | 'item_sold' | 'chat_message'
+           | 'call' | 'system'.
+    `reference_id` carries the deep-link target as a string: a product UUID
+    (college_listing), a chat counterpart/user UUID (chat_message, call), or
+    a transaction UUID (order_placed / item_sold).
+    """
+
+    __tablename__ = "notifications"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    title = Column(String(200), nullable=False)
+    body = Column(String(500), nullable=False)
+
+    # 'college_listing' | 'order_placed' | 'item_sold' | 'chat_message'
+    # | 'call' | 'system'
+    type = Column(String(30), nullable=False, default="system", index=True)
+
+    reference_id = Column(String(64), nullable=True)
+
+    is_read = Column(Boolean, nullable=False, default=False, index=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+
+class CartItem(Base):
+    """One product parked in a student's cart before checkout.
+
+    Unique (user_id, product_id): adding the same listing twice is a no-op.
+    """
+
+    __tablename__ = "cart_items"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    product_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+    product = relationship("Product", lazy="joined")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_cart_user_product"),
+    )
+
+
+class CollegeDirectory(Base):
+    """A college discovered outside the bundled CET catalog, cached forever.
+
+    `GET /colleges` serves the bundled catalog first, then these rows, then
+    (only on a full miss) runs AI / web discovery - `CollegeDirectory` is
+    where the result lands so the same query is paid for exactly once.
+    `source` records how the entry was found ('ai' = Gemini Search grounding,
+    'wikipedia', 'osm' = Nominatim, 'admin' = manual seed).
+
+    Intentionally NOT a foreign-key target: users/products keep denormalized
+    college_name / college_code strings so pickers stay decoupled from this
+    cache (a deleted directory row must never break an account).
+    """
+
+    __tablename__ = "college_directory"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    # DTE / CET Cell institute code when known, otherwise "" (the picker
+    # shows a "Verified Campus" badge for code-less entries).
+    code = Column(String(16), nullable=False, default="", index=True)
+
+    name = Column(String(255), nullable=False, index=True)
+    short_name = Column(String(120), nullable=False, default="")
+    city = Column(String(120), nullable=False, default="", index=True)
+    state = Column(String(120), nullable=False, default="Maharashtra")
+
+    # JSON list - same shape as cet_colleges.CetCollege.aliases.
+    aliases = Column(JSON, nullable=False, default=list)
+
+    source = Column(String(24), nullable=False, default="ai")
+    verified = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )

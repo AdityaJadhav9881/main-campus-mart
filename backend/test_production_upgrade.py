@@ -539,6 +539,7 @@ def test_product_create_persists_gallery_and_vision_price(client):
         condition="Good",
         listed_price=200.0,
     )
-    assert legacy_shaped["image_urls"] == [
-        legacy_shaped["image_url"]
-    ] or legacy_shaped["image_urls"] == ["https://cdn.example.com/front.jpg"]
+    # The gallery is always 4 slots: the single cover URL is cycled to fill
+    # all of them so the detail screen's 4-angle carousel never branches.
+    assert len(legacy_shaped["image_urls"]) == 4
+    assert set(legacy_shaped["image_urls"]) == {legacy_shaped["image_url"]}
