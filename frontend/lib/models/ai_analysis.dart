@@ -19,6 +19,9 @@ class AiPhotoAnalysis {
     this.branch,
     this.academicYear,
     this.whatsappPitch,
+    this.isValidProduct = true,
+    this.rejectionReason,
+    this.retailMrpInr,
   });
 
   factory AiPhotoAnalysis.fromJson(Map<String, dynamic> json) {
@@ -50,6 +53,9 @@ class AiPhotoAnalysis {
       imageUrls: (json['image_urls'] as List<dynamic>? ?? const <dynamic>[])
           .map((dynamic url) => url.toString())
           .toList(growable: false),
+      isValidProduct: json['is_valid_product'] as bool? ?? true,
+      rejectionReason: json['rejection_reason']?.toString(),
+      retailMrpInr: (json['retail_mrp_inr'] as num?)?.toDouble(),
     );
   }
 
@@ -72,6 +78,9 @@ class AiPhotoAnalysis {
   final double listedPriceInr;
   final List<String> aiTags;
   final List<String> imageUrls;
+  final bool isValidProduct;
+  final String? rejectionReason;
+  final double? retailMrpInr;
 
   bool get isLiveVision => source != 'heuristic';
 

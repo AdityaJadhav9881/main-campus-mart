@@ -543,3 +543,66 @@ def test_product_create_persists_gallery_and_vision_price(client):
     # all of them so the detail screen's 4-angle carousel never branches.
     assert len(legacy_shaped["image_urls"]) == 4
     assert set(legacy_shaped["image_urls"]) == {legacy_shaped["image_url"]}
+
+
+# =============================================================================
+# Web & Mobile Screenshot Rejection + Public Price Estimator
+# =============================================================================
+def test_analyze_images_rejects_screenshot(client):
+    response = client.post(
+        "/products/analyze-images",
+        json={
+            "image_urls": [
+                "https://cdn.example.com/Screenshot_20261017_153022.png",
+                "https://cdn.example.com/back.jpg",
+                "https://cdn.example.com/side.jpg",
+                "https://cdn.example.com/label.jpg",
+            ],
+            "title": "Screenshot_20261017_153022.png",
+            "description": "Phone capture",
+        },
+        headers=MOCK_HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["is_valid_product"] is False
+    assert body["suggested_price_inr"] == 0.0
+    assert body["listed_price_inr"] == 0.0
+    assert "screenshot" in (body["rejection_reason"] or "").lower()
+
+
+def test_public_price_estimator_rejects_screenshot(client):
+    # Public endpoint: NO auth headers provided!
+    response = client.post(
+        "/ai/estimate-price",
+        json={
+            "image_url": "https://cdn.example.com/Screenshot_phone.png",
+            "title": "Screenshot 2026-10-17 at 3.30 PM.png",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["is_valid_product"] is False
+    assert body["suggested_price"] == 0.0
+    assert body["safety_status"] == "REJECTED"
+    assert "screenshot" in (body["rejection_reason"] or "").lower()
+
+
+def test_public_price_estimator_valid_product(client):
+    # Public endpoint: NO auth headers provided!
+    response = client.post(
+        "/ai/estimate-price",
+        json={
+            "title": "Bose SoundLink Flex Bluetooth Speaker",
+            "condition": "Good",
+            "age_years": 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["is_valid_product"] is True
+    assert body["rejection_reason"] is None
+    assert body["suggested_price"] > 0
+    assert body["retail_mrp_inr"] is not None and body["retail_mrp_inr"] > 0
+    assert body["safety_status"] == "CLEARED"
+

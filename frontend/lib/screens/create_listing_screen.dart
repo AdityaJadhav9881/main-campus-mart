@@ -362,6 +362,27 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       );
       if (!mounted) return;
 
+      if (!result.isValidProduct) {
+        setState(() {
+          _analysis = null;
+        });
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.danger.withOpacity(0.95),
+            duration: const Duration(seconds: 5),
+            content: Text(
+              result.rejectionReason ??
+                  'Screenshot or invalid image detected. Please upload real photos of the item you want to sell.',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        );
+        return;
+      }
+
       setState(() {
         _analysis = result;
         _autoFilling = true;

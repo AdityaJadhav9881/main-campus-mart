@@ -67,6 +67,8 @@ from ..schemas import (
     ChatMessageCreate,
     ChatMessageRead,
     ConversationRead,
+    PriceEstimateRequest,
+    PriceEstimateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -945,3 +947,31 @@ def ai_chat(
             session_id=session.id,
             session_title=session.title,
         )
+
+
+@ai_router.post(
+    "/estimate-price",
+    response_model=PriceEstimateResponse,
+    summary="Public web price estimator",
+)
+def estimate_price(
+    payload: PriceEstimateRequest,
+    db: Session = Depends(get_db),
+) -> PriceEstimateResponse:
+    """Public, unauthenticated single-item price estimator for the web sandbox.
+
+    Uses Google Gemini Vision + Google Search Grounding (or active provider) to:
+    1. Filter out phone/app screenshots, memes, selfies, and non-product images.
+    2. Identify brand, model, and search Indian retail sites for new MRP in ₹.
+    3. Calculate fair second-hand campus resale value in ₹.
+    """
+    res = vision_master.analyze_web_estimator_item(
+        db,
+        image_base64=payload.image_base64,
+        image_url=payload.image_url,
+        title=payload.title,
+        condition=payload.condition,
+        age_years=payload.age_years,
+    )
+    return PriceEstimateResponse(**res)
+

@@ -742,7 +742,7 @@ class AnalyzeImagesResponse(BaseModel):
                     "value so the item sells fast on campus).",
     )
     ai_tags: list[str] = Field(
-        min_length=5,
+        default_factory=list,
         max_length=20,
         description="10-15 search keywords: brand, synonyms, use-case terms.",
     )
@@ -758,6 +758,18 @@ class AnalyzeImagesResponse(BaseModel):
         default=None,
         description="Punchy 1-line WhatsApp share pitch.",
     )
+    is_valid_product: bool = Field(
+        default=True,
+        description="False if the image is a screenshot, UI screen, meme, selfie, or non-sellable item.",
+    )
+    rejection_reason: str | None = Field(
+        default=None,
+        description="Explanation when is_valid_product is False.",
+    )
+    retail_mrp_inr: float | None = Field(
+        default=None,
+        description="Real brand-new retail MRP in India in INR from search.",
+    )
     image_urls: list[str]
 
     # protected_namespaces=() -> allows the `model` / `model_name` fields
@@ -769,6 +781,40 @@ class AnalyzeImagesHint(BaseModel):
     """Optional extra context the client may attach (unused for now)."""
 
     notes: str | None = None
+
+
+# =============================================================================
+# Public Web Price Estimator (/ai/estimate-price)
+# =============================================================================
+class PriceEstimateRequest(BaseModel):
+    """Request body for public POST /ai/estimate-price."""
+
+    image_base64: str | None = None
+    image_url: str | None = None
+    title: str | None = None
+    condition: str = "Good"
+    age_years: int = 1
+
+
+class PriceEstimateResponse(BaseModel):
+    """Response body for public POST /ai/estimate-price."""
+
+    is_valid_product: bool = True
+    rejection_reason: str | None = None
+    identified_title: str | None = None
+    category: str | None = None
+    branch: str = "All Branches"
+    academic_year: str = "All Years"
+    retail_mrp_inr: float | None = None
+    suggested_price: float = 0.0
+    price_range_min: float = 0.0
+    price_range_max: float = 0.0
+    confidence: int = 0
+    condition_notes: str = ""
+    safety_status: str = "CLEARED"
+    ai_provider_used: str = "Google Gemini Vision + Search"
+
+    model_config = ConfigDict(extra="ignore")
 
 
 # =============================================================================

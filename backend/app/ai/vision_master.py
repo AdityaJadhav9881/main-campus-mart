@@ -218,17 +218,81 @@ def mask_key(key: str | None) -> str | None:
 
 
 # =============================================================================
-# Strict-JSON vision prompt
+# Strict-JSON vision prompts & Anti-Screenshot / Non-Product Detection
 # =============================================================================
 _CATEGORY_LIST = (
     "'Electronics', 'Academic Material', 'Lab Gear & Instruments', "
     "'Stationery', 'Hostel & Lifestyle'"
 )
 
+
+def is_screenshot_or_invalid_candidate(
+    *,
+    title: str | None = None,
+    image_urls: list[str] | None = None,
+    images: list[dict[str, Any]] | None = None,
+) -> tuple[bool, str | None]:
+    """Fast pre-check for screenshot patterns in title, URLs/filenames, or image dimensions."""
+    # 1. Text checks in title
+    if title:
+        t_clean = title.strip().lower()
+        if re.search(r"\b(?:screenshot|screen\s*shot|screencap|screen\s*recording)\b", t_clean):
+            return True, "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell."
+
+    # 2. Check URLs / filenames
+    if image_urls:
+        for u in image_urls:
+            filename = str(u).split("?")[0].split("/")[-1].lower()
+            if re.search(r"(?:screenshot|screen_shot|screen-shot|screencap|capture_\d+)", filename):
+                return True, "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell."
+
+    # 3. Check image dimensions/aspect ratio if PIL is available
+    if images:
+        for img in images:
+            data = img.get("data")
+            if data and len(data) > 0:
+                try:
+                    import io
+                    from PIL import Image
+                    with Image.open(io.BytesIO(data)) as pil_img:
+                        w, h = pil_img.size
+                        fmt = (pil_img.format or "").upper()
+                        if w > 0 and h > 0:
+                            ratio = h / w if h > w else w / h
+                            # Typical Android/iOS screenshots are PNG and aspect ratio >= 2.05
+                            if ratio >= 2.05 and fmt == "PNG":
+                                return True, "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell."
+                except Exception:
+                    pass
+
+    return False, None
+
+
 ANALYSIS_PROMPT = f"""You are the listing-intelligence engine of Campus Mart Ai, an Indian \
 college second-hand marketplace. You receive 4+ photos of one item taken from different \
 angles: Front, Back, Side, and a Close-up/Label shot. Study EVERY photo before answering.
 
+STAGE 1: PRODUCT VALIDITY CHECK (CRITICAL - ANTI-SCREENSHOT & NON-PRODUCT GATE)
+FIRST, inspect whether the uploaded images show a real, physical, sellable product (e.g. bluetooth speaker, \
+textbook, calculator, laptop, cycle, drafter, furniture, earphones, lab coat, instruments, electronics, etc.) \
+OR an invalid image.
+An invalid image includes:
+- A screenshot of a mobile phone screen, app interface, chat message, social media feed, website, or digital UI
+- A meme, graphic art, cartoon, or computer-generated flyer
+- A selfie, photo of a person without an obvious physical item for sale, or portrait
+- A blurry wall, floor, ceiling, blank or completely dark shot
+- A document, sheet of text, receipt, invoice, or paper document
+- A prohibited, dangerous, or non-sellable item
+If the image is ANY of the above, you MUST set "is_valid_product": false, and "rejection_reason": "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell." (or specific reason if selfie/blurry/meme).
+When "is_valid_product" is false:
+- "suggested_price_inr": 0
+- "listed_price_inr": 0
+- "price_min_inr": 0
+- "price_max_inr": 0
+- "retail_mrp_inr": null
+- "safety_status": "REJECTED"
+
+STAGE 2: BRAND, MODEL, AND WEAR INSPECTION (IF VALID)
 Carefully examine all 4 photos and perform deep catalog and brand matching. Read brand names, \
 model numbers, serial numbers, labels, engravings, and ports (e.g. recognizing "Bose SoundLink Flex", \
 "Casio fx-991EX ClassWiz", "Sony WH-1000XM4", "Logitech MX Master", "Apple MacBook Air M1", \
@@ -238,6 +302,9 @@ calculate accurate realistic resale market prices in Indian Rupees (₹).
 
 Return ONLY one JSON object (no markdown, no commentary, no code fences) with exactly these keys:
 {{
+  "is_valid_product": boolean      - true if real physical sellable product; false if screenshot, meme, selfie, or non-product
+  "rejection_reason": string or null - explanation when is_valid_product is false; null if valid
+  "retail_mrp_inr": number or null - brand new retail MRP in India in ₹ from Google Search; null if invalid
   "brand": string or null          - exact brand visible (e.g. "Bose", "Casio", "Apple", "Classmate")
   "model_name": string or null     - exact model/variant (e.g. "SoundLink Flex", "fx-991CW", "AirPods Pro")
   "title": string                  - compelling, accurate marketplace title with brand & model, <= 120 chars
@@ -284,6 +351,74 @@ QUALITY RULES:
   * Extract exact brand and model when text or logos are visible in any photo angle.
   * ai_tags must include brand, model, synonyms, and practical college search queries.
   * Return strict valid JSON only."""
+
+
+WEB_ESTIMATOR_PROMPT = """You are the expert valuation, authenticity, and visual search engine \
+of CampusMart AI, an Indian college second-hand marketplace.
+A website user is requesting a price valuation of an item in Indian Rupees (₹).
+User Context:
+* Hint / item name: {title}
+* Condition declared: {condition}
+* Approximate age: {age_years} year(s)
+
+Carefully examine the photo(s) and perform deep visual inspection and Google Search Grounding.
+
+STAGE 1: PRODUCT VALIDITY CHECK (CRITICAL - ANTI-SCREENSHOT & NON-PRODUCT GATE)
+FIRST, inspect whether the photo shows a REAL, PHYSICAL, SELLABLE PRODUCT (like a bluetooth speaker, \
+headphones, textbook, calculator, laptop, cycle, camera, drafter, lab gear, backpack, phone, tablet, shoes, desk, chair) \
+OR an invalid image.
+An invalid image includes:
+- A screenshot of a mobile phone screen, app interface, chat message, social media feed, website, or digital UI
+- A meme, graphic art, cartoon, or computer-generated flyer
+- A selfie, photo of a person without an obvious physical item for sale, or portrait
+- A blurry wall, floor, ceiling, blank or completely dark shot
+- A document, sheet of text, receipt, invoice, or paper document
+- A prohibited, dangerous, or non-sellable item
+If the image is ANY of the above, you MUST set "is_valid_product": false, and "rejection_reason": "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell." (or explain if selfie/blurry/meme).
+When "is_valid_product" is false:
+- "suggested_price": 0
+- "price_range_min": 0
+- "price_range_max": 0
+- "retail_mrp_inr": null
+- "confidence": 0
+- "safety_status": "REJECTED"
+- "identified_title": null
+- "category": null
+
+STAGE 2: BRAND & MODEL IDENTIFICATION (IF VALID)
+Examine logos, text, brand markings, model names, ports, and colors. Completely ignore junk file names like "WhatsApp Image 2026-..." or "IMG_...". Identify the true brand and model (e.g. "Bose SoundLink Flex Bluetooth Speaker (2nd Gen)", "Casio fx-991EX ClassWiz", "Sony WH-1000XM4 ANC Headphones", "Apple iPad 9th Gen 64GB WiFi", "Concepts of Physics Vol 1 by HC Verma").
+
+STAGE 3: LIVE INDIAN RETAIL MRP SEARCH (₹)
+Search Google for the current brand-new retail price (MRP) in India in Indian Rupees (₹) on Amazon.in, Flipkart, or Croma.
+Set "retail_mrp_inr" to this real current retail price (e.g. 12900 for Bose SoundLink Flex, 1295 for Casio 991EX).
+
+STAGE 4: STUDENT RESALE PRICING IN INR (₹)
+Calculate a fair student campus resale price based on condition ({condition}) and age ({age_years} yr):
+- Like New (0-1 yr old): ~70-85% of current MRP
+- Good (1-2 yrs old): ~55-70% of current MRP
+- Fair (2+ yrs old): ~35-50% of current MRP
+Set "suggested_price" (rounded to nearest 10 or 50).
+Set "price_range_min" and "price_range_max" (approx 8-12% around suggested_price).
+Set "confidence" (integer 85-98 for clear branded items, 70-85 for generic items).
+Set "safety_status": "CLEARED".
+Write "condition_notes": 1-2 sentences summarizing: "Identified <brand/model>. Current Indian retail price is ~₹<mrp>. Fair campus resale for <condition> (<age> yr old) is ₹<price>."
+
+Return ONLY one valid JSON object (no markdown fences, no extra text) with these keys:
+{{
+  "is_valid_product": boolean,
+  "rejection_reason": string or null,
+  "identified_title": string or null,
+  "category": string or null,
+  "branch": string,
+  "academic_year": string,
+  "retail_mrp_inr": number or null,
+  "suggested_price": number,
+  "price_range_min": number,
+  "price_range_max": number,
+  "confidence": number,
+  "condition_notes": string,
+  "safety_status": "CLEARED" or "REJECTED"
+}}"""
 
 
 # =============================================================================
@@ -438,12 +573,40 @@ def _normalize_analysis(
     if condition not in VALID_CONDITIONS:
         condition = "Good"
 
-    price_min = max(5.0, _coerce_float(raw.get("price_min_inr"), 100.0))
-    price_max = max(price_min + 10.0, _coerce_float(raw.get("price_max_inr"), price_min * 2))
-    suggested = _coerce_float(raw.get("suggested_price_inr"), (price_min + price_max) / 2)
-    listed = _coerce_float(raw.get("listed_price_inr"), suggested)
-    suggested = round(max(suggested, 5.0) / 10) * 10
-    listed = round(max(listed, 5.0) / 10) * 10
+    is_valid = raw.get("is_valid_product")
+    if is_valid is None:
+        is_valid = raw.get("rejection_reason") is None and raw.get("safety_status") != "REJECTED"
+    else:
+        is_valid = bool(is_valid)
+
+    rejection_reason = raw.get("rejection_reason")
+    if not is_valid and not rejection_reason:
+        rejection_reason = (
+            "This image appears to be a mobile app/screen screenshot, not a physical "
+            "product. Please upload a real photo of the item you want to sell."
+        )
+
+    retail_mrp_inr = _coerce_float(raw.get("retail_mrp_inr"), 0.0)
+    if retail_mrp_inr <= 0:
+        retail_mrp_inr = None
+
+    if not is_valid:
+        price_min = 0.0
+        price_max = 0.0
+        suggested = 0.0
+        listed = 0.0
+        condition_notes = rejection_reason or "Non-product or screenshot detected."
+    else:
+        price_min = max(5.0, _coerce_float(raw.get("price_min_inr"), 100.0))
+        price_max = max(price_min + 10.0, _coerce_float(raw.get("price_max_inr"), price_min * 2))
+        suggested = _coerce_float(raw.get("suggested_price_inr"), (price_min + price_max) / 2)
+        listed = _coerce_float(raw.get("listed_price_inr"), suggested)
+        suggested = round(max(suggested, 5.0) / 10) * 10
+        listed = round(max(listed, 5.0) / 10) * 10
+        condition_notes = str(
+            raw.get("condition_notes")
+            or "No 4-angle inspection notes were produced."
+        ).strip()[:2000]
 
     tags = _clean_tags(raw.get("ai_tags"))
     title = str(raw.get("title") or "Campus listing").strip()[:200]
@@ -465,18 +628,18 @@ def _normalize_analysis(
         "category": category,
         "branch": branch,
         "academic_year": academic_year,
-        "whatsapp_pitch": whatsapp_pitch,
+        "whatsapp_pitch": whatsapp_pitch if is_valid else None,
         "condition": condition,
-        "condition_notes": str(
-            raw.get("condition_notes")
-            or "No 4-angle inspection notes were produced."
-        ).strip()[:2000],
+        "condition_notes": condition_notes,
         "price_min_inr": price_min,
         "price_max_inr": price_max,
         "suggested_price_inr": suggested,
         "listed_price_inr": listed,
         "ai_tags": tags,
         "image_urls": list(image_urls),
+        "is_valid_product": is_valid,
+        "rejection_reason": rejection_reason if not is_valid else None,
+        "retail_mrp_inr": retail_mrp_inr,
     }
 
 
@@ -814,12 +977,43 @@ def heuristic_analyze(
     title: str | None = None,
     description: str | None = None,
     condition: str | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Rule-based INR analysis used when no vision API key is configured.
 
     Deliberately honest in `condition_notes`: it tells the seller the 4-angle
     AI inspection will switch on once the Master Admin saves a key.
     """
+    is_screenshot, reason = is_screenshot_or_invalid_candidate(
+        title=title, image_urls=image_urls, images=images
+    )
+    if is_screenshot:
+        return {
+            "source": "heuristic",
+            "provider": "heuristic",
+            "model": "inr-heuristic-v1",
+            "is_valid_product": False,
+            "rejection_reason": reason or "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell.",
+            "brand": None,
+            "model_name": None,
+            "title": "Non-product / Screenshot detected",
+            "description": "Upload rejected: Screenshot or invalid image detected. Please upload a real photo of the item you want to sell.",
+            "category": "Other",
+            "branch": "All Branches",
+            "academic_year": "All Years",
+            "whatsapp_pitch": None,
+            "condition": "Fair",
+            "condition_notes": reason or "Screenshot detected. Please upload a real photo of the item you want to sell.",
+            "price_min_inr": 0.0,
+            "price_max_inr": 0.0,
+            "suggested_price_inr": 0.0,
+            "listed_price_inr": 0.0,
+            "retail_mrp_inr": None,
+            "ai_tags": ["screenshot", "invalid", "re-upload photo"],
+            "image_urls": list(image_urls or []),
+            "safety_status": "REJECTED",
+        }
+
     text = f"{title or ''} {description or ''}".lower().strip()
 
     matched_category = None
@@ -880,6 +1074,8 @@ def heuristic_analyze(
         "source": "heuristic",
         "provider": "heuristic",
         "model": "inr-heuristic-v1",
+        "is_valid_product": True,
+        "rejection_reason": None,
         "brand": None,
         "model_name": None,
         "title": base_title[:200],
@@ -899,8 +1095,10 @@ def heuristic_analyze(
         "price_max_inr": float(price_max),
         "suggested_price_inr": suggested,
         "listed_price_inr": listed,
+        "retail_mrp_inr": round(float(price_max) * 1.35 / 50) * 50,
         "ai_tags": tags,
         "image_urls": list(image_urls),
+        "safety_status": "CLEARED",
     }
 
 
@@ -934,12 +1132,6 @@ def analyze_listing_images(
             hint += f"\n* seller-declared condition: {condition}"
 
     keys = key_pool_engine.select_ordered_keys(db, "vision")
-    if not keys:
-        logger.info("vision_master: no vision key configured -> INR heuristic")
-        return heuristic_analyze(
-            image_urls, title=title, description=description, condition=condition
-        )
-
     try:
         images = _gather_images(image_urls)
     except Exception:  # noqa: BLE001 - photos unreadable -> deterministic plan B
@@ -954,7 +1146,29 @@ def analyze_listing_images(
         )[:2000]
         return result
 
+    is_screenshot, reason = is_screenshot_or_invalid_candidate(
+        title=title, image_urls=image_urls, images=images
+    )
+    if is_screenshot and not keys:
+        return heuristic_analyze(
+            image_urls, title=title, description=description, condition=condition, images=images
+        )
+
+    if not keys:
+        logger.info("vision_master: no vision key configured -> INR heuristic")
+        return heuristic_analyze(
+            image_urls, title=title, description=description, condition=condition, images=images
+        )
+
     prompt = ANALYSIS_PROMPT + hint
+    if is_screenshot:
+        prompt += (
+            "\n\nCRITICAL PRE-CHECK WARNING: The filename, dimensions, or title suggest a potential "
+            "phone screen screenshot or UI screen. Scrutinize the images carefully: if any image "
+            "is a phone screenshot, app interface, or non-sellable graphic, set is_valid_product: false "
+            "and rejection_reason immediately."
+        )
+
     for key in keys:
         config = key_pool_engine.build_provider_config(key)
         started = time.monotonic()
@@ -981,7 +1195,7 @@ def analyze_listing_images(
 
     logger.error("vision_master: all %d vision keys failed -> INR heuristic", len(keys))
     result = heuristic_analyze(
-        image_urls, title=title, description=description, condition=condition
+        image_urls, title=title, description=description, condition=condition, images=images
     )
     result["condition_notes"] = (
         "Every configured Vision AI key is temporarily unavailable or rate "
@@ -989,6 +1203,248 @@ def analyze_listing_images(
         f"{result['condition_notes']}"
     )[:2000]
     return result
+
+
+def analyze_web_estimator_item(
+    db: Session,
+    *,
+    image_base64: str | None = None,
+    image_url: str | None = None,
+    title: str | None = None,
+    condition: str = "Good",
+    age_years: int = 1,
+) -> dict[str, Any]:
+    """Public web Price Estimator analysis (/ai/estimate-price).
+
+    Inspects image or title with Gemini Vision + Google Search Grounding to:
+    1. Reject screenshots, UI captures, memes, or non-sellable images.
+    2. Identify brand & model from photo (ignoring generic filenames).
+    3. Look up real current Indian retail MRP on Amazon.in/Flipkart/Croma.
+    4. Calculate realistic second-hand student resale price in INR (₹).
+    """
+    images: list[dict[str, Any]] = []
+
+    # 1. Parse image_base64 if provided
+    if image_base64 and isinstance(image_base64, str) and image_base64.strip():
+        raw_b64 = image_base64.strip()
+        mime = "image/jpeg"
+        if raw_b64.startswith("data:"):
+            try:
+                header, b64_part = raw_b64.split(",", 1)
+                mime = header.split(";")[0].replace("data:", "").strip() or "image/jpeg"
+                data = base64.b64decode(b64_part)
+                images.append({
+                    "url": "upload.jpg",
+                    "data": data,
+                    "mime": mime,
+                    "b64": b64_part,
+                })
+            except Exception as e:
+                logger.warning("Could not decode image_base64 data URI: %s", e)
+        else:
+            try:
+                data = base64.b64decode(raw_b64)
+                mime = _sniff_mime(data) or "image/jpeg"
+                images.append({
+                    "url": "upload.jpg",
+                    "data": data,
+                    "mime": mime,
+                    "b64": raw_b64,
+                })
+            except Exception as e:
+                logger.warning("Could not decode raw image_base64: %s", e)
+
+    # 2. Parse image_url if provided and images still empty
+    if not images and image_url and isinstance(image_url, str) and image_url.strip():
+        data, mime = _download_image(image_url.strip())
+        if data:
+            images.append({
+                "url": image_url.strip(),
+                "data": data,
+                "mime": mime or "image/jpeg",
+                "b64": base64.b64encode(data).decode("ascii"),
+            })
+
+    # 3. Check for obvious screenshot patterns
+    urls = [image_url] if image_url else []
+    is_screenshot, reason = is_screenshot_or_invalid_candidate(
+        title=title, image_urls=urls, images=images
+    )
+
+    keys = key_pool_engine.select_ordered_keys(db, "vision")
+    if not keys and is_screenshot:
+        return {
+            "is_valid_product": False,
+            "rejection_reason": reason or "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell.",
+            "identified_title": None,
+            "category": None,
+            "branch": "All Branches",
+            "academic_year": "All Years",
+            "retail_mrp_inr": None,
+            "suggested_price": 0.0,
+            "price_range_min": 0.0,
+            "price_range_max": 0.0,
+            "confidence": 0,
+            "condition_notes": reason or "Screenshot detected. Price estimation rejected.",
+            "safety_status": "REJECTED",
+            "ai_provider_used": "CampusMart Screen & Fraud Filter",
+        }
+
+    # If keys exist, let Gemini Vision + Google Search inspect with WEB_ESTIMATOR_PROMPT
+    if keys:
+        prompt = WEB_ESTIMATOR_PROMPT.format(
+            title=title or "None provided (identify from photo)",
+            condition=condition or "Good",
+            age_years=age_years or 1,
+        )
+        if is_screenshot:
+            prompt += (
+                "\n\nCRITICAL PRE-CHECK WARNING: Automated pre-check suspected a screen screenshot or UI capture. "
+                "Scrutinize the image carefully: if it is indeed a screenshot, set is_valid_product: false and "
+                "safety_status: REJECTED."
+            )
+
+        for key in keys:
+            config = key_pool_engine.build_provider_config(key)
+            started = time.monotonic()
+            try:
+                raw_text, model_used = _invoke_vision_llm(config, prompt, images)
+                key_pool_engine.mark_success(
+                    key.id, latency_ms=(time.monotonic() - started) * 1000
+                )
+                data = _extract_json(raw_text)
+
+                is_valid = data.get("is_valid_product")
+                if is_valid is None:
+                    is_valid = data.get("safety_status") != "REJECTED" and data.get("rejection_reason") is None
+                else:
+                    is_valid = bool(is_valid)
+
+                rej_reason = data.get("rejection_reason")
+                if not is_valid and not rej_reason:
+                    rej_reason = (
+                        "This image appears to be a mobile app/screen screenshot, not a physical "
+                        "product. Please upload a real photo of the item you want to sell."
+                    )
+
+                if not is_valid:
+                    return {
+                        "is_valid_product": False,
+                        "rejection_reason": rej_reason,
+                        "identified_title": None,
+                        "category": None,
+                        "branch": "All Branches",
+                        "academic_year": "All Years",
+                        "retail_mrp_inr": None,
+                        "suggested_price": 0.0,
+                        "price_range_min": 0.0,
+                        "price_range_max": 0.0,
+                        "confidence": 0,
+                        "condition_notes": rej_reason,
+                        "safety_status": "REJECTED",
+                        "ai_provider_used": (
+                            f"Google Gemini Vision + Search ({model_used})"
+                            if "gemini" in key.provider
+                            else f"{key.provider.title()} Vision ({model_used})"
+                        ),
+                    }
+
+                retail_mrp = _coerce_float(data.get("retail_mrp_inr"), 0.0)
+                suggested = _coerce_float(data.get("suggested_price"), 0.0)
+                p_min = _coerce_float(data.get("price_range_min"), suggested * 0.9)
+                p_max = _coerce_float(data.get("price_range_max"), suggested * 1.1)
+                confidence = int(_coerce_float(data.get("confidence"), 85.0))
+
+                return {
+                    "is_valid_product": True,
+                    "rejection_reason": None,
+                    "identified_title": str(data.get("identified_title") or title or "Valued Item").strip(),
+                    "category": str(data.get("category") or "Electronics").strip(),
+                    "branch": str(data.get("branch") or "All Branches").strip(),
+                    "academic_year": str(data.get("academic_year") or "All Years").strip(),
+                    "retail_mrp_inr": retail_mrp if retail_mrp > 0 else None,
+                    "suggested_price": round(suggested / 10) * 10,
+                    "price_range_min": round(p_min / 10) * 10,
+                    "price_range_max": round(p_max / 10) * 10,
+                    "confidence": max(10, min(100, confidence)),
+                    "condition_notes": str(
+                        data.get("condition_notes")
+                        or f"Identified item. Fair campus resale value is ~₹{suggested:.0f}."
+                    ).strip(),
+                    "safety_status": "CLEARED",
+                    "ai_provider_used": (
+                        f"Google Gemini Vision + Search ({model_used})"
+                        if "gemini" in key.provider
+                        else f"{key.provider.title()} Vision ({model_used})"
+                    ),
+                }
+            except Exception as exc:
+                key_pool_engine.mark_failure(key.id, exc)
+                logger.warning("analyze_web_estimator_item: key %s failed: %s", key.id, exc)
+
+    # Offline heuristic fallback for web estimator
+    if is_screenshot:
+        return {
+            "is_valid_product": False,
+            "rejection_reason": reason or "This image appears to be a mobile app/screen screenshot, not a physical product. Please upload a real photo of the item you want to sell.",
+            "identified_title": None,
+            "category": None,
+            "branch": "All Branches",
+            "academic_year": "All Years",
+            "retail_mrp_inr": None,
+            "suggested_price": 0.0,
+            "price_range_min": 0.0,
+            "price_range_max": 0.0,
+            "confidence": 0,
+            "condition_notes": reason or "Screenshot detected. Price estimation rejected.",
+            "safety_status": "REJECTED",
+            "ai_provider_used": "CampusMart Screen & Fraud Filter",
+        }
+
+    item_title = (title or "").strip()
+    if not item_title and images:
+        item_title = "Valued Item"
+    elif not item_title:
+        return {
+            "is_valid_product": False,
+            "rejection_reason": "No image or item name was provided for valuation.",
+            "identified_title": None,
+            "category": None,
+            "branch": "All Branches",
+            "academic_year": "All Years",
+            "retail_mrp_inr": None,
+            "suggested_price": 0.0,
+            "price_range_min": 0.0,
+            "price_range_max": 0.0,
+            "confidence": 0,
+            "condition_notes": "Please upload a photo or provide an item title.",
+            "safety_status": "REJECTED",
+            "ai_provider_used": "CampusMart Valuation Engine",
+        }
+
+    h_res = heuristic_analyze([], title=item_title, condition=condition)
+    cat = h_res.get("category") or "Electronics"
+    s_price = h_res.get("suggested_price_inr") or 1000.0
+    age_discount = 0.88 ** max(0, age_years - 1)
+    adj_price = round((s_price * age_discount) / 50) * 50
+    mrp_est = round((adj_price * 1.55) / 100) * 100
+
+    return {
+        "is_valid_product": True,
+        "rejection_reason": None,
+        "identified_title": item_title,
+        "category": cat,
+        "branch": h_res.get("branch") or "All Branches",
+        "academic_year": h_res.get("academic_year") or "All Years",
+        "retail_mrp_inr": mrp_est,
+        "suggested_price": adj_price,
+        "price_range_min": round(adj_price * 0.9 / 10) * 10,
+        "price_range_max": round(adj_price * 1.1 / 10) * 10,
+        "confidence": 85,
+        "condition_notes": f"Estimated based on Indian campus resale benchmarks. Fair price for {condition} condition (~{age_years} yr old) is ₹{adj_price:.0f}.",
+        "safety_status": "CLEARED",
+        "ai_provider_used": "CampusMart Valuation Engine",
+    }
 
 
 def chat_completion(
