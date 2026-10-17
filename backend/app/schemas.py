@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Deliberately permissive pattern - the real address-verification/sign-up
 # flow lives in Firebase Auth, not here.
@@ -1307,7 +1307,7 @@ class CheckoutRequest(BaseModel):
     """
 
     delivery_address: str | None = Field(
-        default=None,
+        default="Campus handover",
         max_length=400,
         description="Where the buyer wants the item handed over.",
     )
@@ -1318,11 +1318,11 @@ class CheckoutRequest(BaseModel):
     )
     contact_phone: str | None = Field(
         default=None,
-        max_length=20,
+        max_length=40,
         description="Buyer's phone number for the seller to reach them.",
     )
-    payment_method: Literal["cash_on_meetup", "gpay_upi"] | None = Field(
-        default=None,
+    payment_method: str | None = Field(
+        default="cash_on_meetup",
         description="'cash_on_meetup' or 'gpay_upi'.",
     )
     upi_reference: str | None = Field(
@@ -1332,7 +1332,7 @@ class CheckoutRequest(BaseModel):
     )
     otp_code: str | None = Field(
         default=None,
-        max_length=8,
+        max_length=32,
         description="Email action-OTP that authorised this purchase.",
     )
     notes: str | None = Field(
@@ -1340,6 +1340,32 @@ class CheckoutRequest(BaseModel):
         max_length=1000,
         description="Free-form pickup notes for the seller.",
     )
+
+    @field_validator("payment_method", mode="before")
+    @classmethod
+    def normalize_payment_method(cls, v: Any) -> str:
+        if not v:
+            return "cash_on_meetup"
+        s = str(v).strip().lower()
+        if any(term in s for term in ["gpay", "upi", "google pay", "online"]):
+            return "gpay_upi"
+        return "cash_on_meetup"
+
+    @field_validator(
+        "delivery_address",
+        "hostel_or_landmark",
+        "contact_phone",
+        "upi_reference",
+        "otp_code",
+        "notes",
+        mode="before",
+    )
+    @classmethod
+    def sanitize_strings(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        trimmed = str(v).strip()
+        return trimmed if trimmed else None
 
 
 class CallEventRequest(BaseModel):

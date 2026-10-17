@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../services/api_service.dart';
@@ -46,6 +47,9 @@ class InAppCallScreen extends StatefulWidget {
 
 class _InAppCallScreenState extends State<InAppCallScreen>
     with SingleTickerProviderStateMixin {
+  static const MethodChannel _callAudioChannel =
+      MethodChannel('campusmart.ai/notifications');
+
   late final AnimationController _pulse;
 
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
@@ -82,23 +86,46 @@ class _InAppCallScreenState extends State<InAppCallScreen>
       await _localRenderer.initialize();
       await _remoteRenderer.initialize();
 
-      // Create WebRTC PeerConnection with Google STUN servers
+      // Configure native telecom/communication audio routing on Android
+      try {
+        await Helper.setAndroidAudioConfiguration(
+          AndroidAudioConfiguration.communication,
+        );
+        await _callAudioChannel.invokeMethod('configureCallAudio', {
+          'enableSpeaker': _speaker,
+        });
+      } catch (_) {}
+
+      // Create WebRTC PeerConnection with STUN + OpenRelay TURN servers
       final rtcConfig = <String, dynamic>{
         'iceServers': [
           {'urls': 'stun:stun.l.google.com:19302'},
           {'urls': 'stun:stun1.l.google.com:19302'},
+          {
+            'urls': [
+              'turn:openrelay.metered.ca:80',
+              'turn:openrelay.metered.ca:443',
+              'turn:openrelay.metered.ca:443?transport=tcp',
+            ],
+            'username': 'openrelay',
+            'credential': 'openrelay',
+          },
         ],
         'sdpSemantics': 'unified-plan',
       };
 
       _peerConnection = await createPeerConnection(rtcConfig);
 
-      // Hardware mic + camera acquisition
+      // Hardware mic + camera acquisition with mandatory speech processing
       final mediaConstraints = <String, dynamic>{
         'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
+          'mandatory': {
+            'googEchoCancellation': 'true',
+            'googAutoGainControl': 'true',
+            'googNoiseSuppression': 'true',
+            'googHighpassFilter': 'true',
+          },
+          'optional': <dynamic>[],
         },
         'video': _video
             ? {
@@ -119,8 +146,14 @@ class _InAppCallScreenState extends State<InAppCallScreen>
         await _peerConnection?.addTrack(track, _localStream!);
       }
 
-      // Handle remote incoming track
+      // Handle remote incoming tracks: enable audio track & set volume
       _peerConnection?.onTrack = (RTCTrackEvent event) {
+        if (event.track.kind == 'audio') {
+          event.track.enabled = true;
+          try {
+            Helper.setVolume(1.0, event.track);
+          } catch (_) {}
+        }
         if (event.streams.isNotEmpty) {
           _remoteRenderer.srcObject = event.streams[0];
           if (mounted) setState(() {});
@@ -259,9 +292,22 @@ class _InAppCallScreenState extends State<InAppCallScreen>
       if (!mounted) return;
       setState(() => _seconds += 1);
     });
+
+    // Re-assert telecom/communication audio routing once connection is active
+    Future.delayed(const Duration(milliseconds: 500), () async {
+      try {
+        await Helper.setSpeakerphoneOn(_speaker);
+        await _callAudioChannel.invokeMethod('configureCallAudio', {
+          'enableSpeaker': _speaker,
+        });
+      } catch (_) {}
+    });
   }
 
   Future<void> _disposeWebRtc() async {
+    try {
+      await _callAudioChannel.invokeMethod('releaseCallAudio');
+    } catch (_) {}
     try {
       _localStream?.getTracks().forEach((track) {
         track.stop();
@@ -589,6 +635,9 @@ class _InAppCallScreenState extends State<InAppCallScreen>
                 _speaker = !_speaker;
                 try {
                   Helper.setSpeakerphoneOn(_speaker);
+                  _callAudioChannel.invokeMethod('configureCallAudio', {
+                    'enableSpeaker': _speaker,
+                  });
                 } catch (_) {}
               });
             },

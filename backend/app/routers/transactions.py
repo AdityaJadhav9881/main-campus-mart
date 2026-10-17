@@ -117,7 +117,7 @@ def purchase_product(
         delivery_address=(payload.delivery_address or "").strip() or None,
         hostel_or_landmark=(payload.hostel_or_landmark or "").strip() or None,
         contact_phone=(payload.contact_phone or "").strip() or None,
-        payment_method=payload.payment_method,
+        payment_method=payload.payment_method or "cash_on_meetup",
         upi_reference=(payload.upi_reference or "").strip() or None,
         order_notes=(payload.notes or "").strip() or None,
         otp_code=(payload.otp_code or "").strip() or None,

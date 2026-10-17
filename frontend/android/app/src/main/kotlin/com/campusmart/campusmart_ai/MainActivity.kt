@@ -6,13 +6,21 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -23,9 +31,8 @@ import io.flutter.plugin.common.MethodChannel
 
 /**
  * Hosts native bridges for:
- *   1. "campusmart.ai/notifications": heads-up alerts & permission handling.
- *   2. "campusmart.ai/native": permission sweeps, incoming call ringtone playback,
- *      and background service credentials management.
+ *   1. "campusmart.ai/notifications": heads-up alerts, Android 12-16 call audio routing, and incoming call launch.
+ *   2. "campusmart.ai/native": permission sweeps, incoming call ringtone, and background service lifecycle.
  */
 class MainActivity : FlutterActivity() {
 
@@ -35,16 +42,47 @@ class MainActivity : FlutterActivity() {
 
     private var currentRingtone: Ringtone? = null
     private var isRinging = false
+    private var latestIncomingCallJson: String? = null
+    private var notifChannel: MethodChannel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            } else {
+                @Suppress("DEPRECATION")
+                window.addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                )
+            }
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             createNotificationChannel()
+            handleIncomingCallIntent(intent)
         } catch (_: Exception) {}
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingCallIntent(intent)
+    }
+
+    private fun handleIncomingCallIntent(intent: Intent?) {
+        val callJson = intent?.getStringExtra("incoming_call_json")
+        if (!callJson.isNullOrEmpty()) {
+            latestIncomingCallJson = callJson
+            notifChannel?.invokeMethod("onIncomingCallLaunched", callJson)
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        notifChannel = channel
 
         val handler: (io.flutter.plugin.common.MethodCall, MethodChannel.Result) -> Unit = { call, result ->
             when (call.method) {
@@ -70,6 +108,22 @@ class MainActivity : FlutterActivity() {
                 }
                 "stopRingtone" -> {
                     stopRinging()
+                    result.success(true)
+                }
+                "configureCallAudio" -> {
+                    val enableSpeaker = call.argument<Boolean>("enableSpeaker") ?: true
+                    configureCallAudio(enableSpeaker)
+                    result.success(true)
+                }
+                "releaseCallAudio" -> {
+                    releaseCallAudio()
+                    result.success(true)
+                }
+                "getInitialIncomingCall" -> {
+                    result.success(latestIncomingCallJson)
+                }
+                "clearInitialIncomingCall" -> {
+                    latestIncomingCallJson = null
                     result.success(true)
                 }
                 "saveNativeCredentials" -> {
@@ -105,10 +159,69 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler(handler)
+        channel.setMethodCallHandler(handler)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, nativeChannelName)
             .setMethodCallHandler(handler)
+    }
+
+    private fun configureCallAudio(enableSpeaker: Boolean) {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAcceptsDelayedFocusGain(false)
+                    .build()
+                audioManager.requestAudioFocus(focusRequest)
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_VOICE_CALL,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                )
+            }
+
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isMicrophoneMute = false
+            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_VOICE_CALL,
+                (maxVol * 0.85).toInt().coerceAtLeast(1),
+                0
+            )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val devices = audioManager.availableCommunicationDevices
+                val targetType = if (enableSpeaker) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                val targetDevice = devices.find { it.type == targetType }
+                    ?: if (enableSpeaker) devices.find { it.type == AudioDeviceInfo.TYPE_SPEAKER } else null
+                if (targetDevice != null) {
+                    audioManager.setCommunicationDevice(targetDevice)
+                }
+            }
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = enableSpeaker
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseCallAudio() {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice()
+            }
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = false
+            audioManager.mode = AudioManager.MODE_NORMAL
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+        } catch (_: Exception) {}
     }
 
     private fun createNotificationChannel() {
@@ -165,6 +278,12 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT)
+                }
+            }
+
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.CAMERA)
             }
@@ -178,6 +297,30 @@ class MainActivity : FlutterActivity() {
                     permissionsToRequest.toTypedArray(),
                     9002
                 )
+            }
+
+            // Exemption from Android battery freezing (prevents OS from freezing background polling/socket)
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (_: Exception) {}
+            }
+
+            // Android 14-16 full-screen intent authorization check
+            if (Build.VERSION.SDK_INT >= 34) {
+                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                if (notificationManager != null && !notificationManager.canUseFullScreenIntent()) {
+                    try {
+                        val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                        startActivity(intent)
+                    } catch (_: Exception) {}
+                }
             }
         } catch (_: Exception) {}
     }
@@ -193,7 +336,6 @@ class MainActivity : FlutterActivity() {
             }
             currentRingtone?.play()
 
-            // Vibrate
             val vibrator = getVibrator()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator?.vibrate(

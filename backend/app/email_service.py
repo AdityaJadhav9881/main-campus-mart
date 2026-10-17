@@ -36,6 +36,8 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from typing import Any
+
 logger = logging.getLogger(__name__)
 
 # Resolve /backend/.env regardless of the process working directory.
@@ -137,20 +139,39 @@ _DANGER = "#dc2626"      # Danger Red
 def _shell(heading: str, body_html: str) -> str:
     """Wrap body markup in the Campus Mart Ai branded card layout."""
     return f"""<!DOCTYPE html>
-<html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <style>
+      :root {{
+        color-scheme: light;
+        supported-color-schemes: light;
+      }}
+      body {{
+        margin: 0;
+        padding: 0;
+        background: {_SURFACE};
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }}
+    </style>
+  </head>
   <body style="margin:0; padding:0; background:{_SURFACE};
-               font-family:Segoe UI, Roboto, Helvetica, Arial, sans-serif;">
+               font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+               -webkit-font-smoothing:antialiased;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
            style="background:{_SURFACE}; padding:24px 12px;">
       <tr><td align="center">
         <table role="presentation" width="560" cellpadding="0" cellspacing="0"
                style="max-width:560px; width:100%; background:#ffffff;
                       border-radius:16px; overflow:hidden;
-                      border:1px solid #e2e8f0;">
+                      border:1px solid #e2e8f0; box-shadow:0 4px 14px rgba(0,0,0,0.04);">
           <tr>
             <td style="background:linear-gradient(135deg, {_BRAND}, {_BRAND_DARK});
                        padding:22px 28px;">
-              <div style="color:#ffffff; font-size:20px; font-weight:700;">
+              <div style="color:#ffffff; font-size:20px; font-weight:700; letter-spacing:-0.2px;">
                 Campus Mart Ai
               </div>
               <div style="color:#c7d2fe; font-size:12px; margin-top:4px;">
@@ -160,7 +181,7 @@ def _shell(heading: str, body_html: str) -> str:
           </tr>
           <tr>
             <td style="padding:28px;">
-              <h1 style="margin:0 0 16px 0; font-size:20px; color:{_TEXT};">
+              <h1 style="margin:0 0 16px 0; font-size:20px; font-weight:700; color:{_TEXT};">
                 {heading}
               </h1>
               {body_html}
@@ -188,9 +209,9 @@ def _row(label: str, value: str) -> str:
     """One label/value row used by the listing + order templates."""
     return (
         f'<tr>'
-        f'<td style="padding:9px 0; border-bottom:1px solid #e2e8f0; '
-        f'color:{_MUTED}; font-size:13px; width:44%;">{label}</td>'
-        f'<td style="padding:9px 0; border-bottom:1px solid #e2e8f0; '
+        f'<td style="padding:10px 0; border-bottom:1px solid #e5e7eb; '
+        f'color:{_MUTED}; font-size:13px; text-align:left;">{label}</td>'
+        f'<td style="padding:10px 0; border-bottom:1px solid #e5e7eb; '
         f'color:{_TEXT}; font-size:13px; font-weight:600; text-align:right;">'
         f"{value}</td>"
         f"</tr>"
@@ -206,13 +227,16 @@ def _pill(text: str, color: str) -> str:
 
 
 def _image_html(image_url: str | None) -> str:
-    """Product photo block (skipped when the listing has no photo)."""
+    """Product photo block - fixed 110x110 square thumbnail with object-fit: cover."""
     if not image_url:
         return ""
     return (
-        f'<img src="{image_url}" alt="Listing photo" width="500"'
-        f' style="display:block; width:100%; max-width:500px; border-radius:12px;'
-        f' border:1px solid #e2e8f0; margin:18px 0;" />'
+        f'<div style="text-align:center; margin:0 auto 14px auto;">'
+        f'<img src="{image_url}" alt="Listing photo" width="110" height="110"'
+        f' style="display:inline-block; width:110px; height:110px; max-width:110px; max-height:110px;'
+        f' object-fit:cover; border-radius:14px; border:1px solid #e5e7eb;'
+        f' box-shadow:0 2px 8px rgba(0,0,0,0.06);" />'
+        f'</div>'
     )
 
 
@@ -276,18 +300,16 @@ def send_otp_email(to_email: str, name: str, otp_code: str) -> bool:
         Use this code to verify your email and finish creating your
         Campus Mart Ai account:
       </p>
-      <div style="text-align:center; margin:22px 0;">
-        <span style="display:inline-block; letter-spacing:10px;
-                     font-size:34px; font-weight:800; color:{_BRAND};
-                     background:{_BRAND}14; border:2px dashed {_BRAND};
-                     border-radius:14px; padding:16px 18px 16px 28px;">
+      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                  padding:24px 16px; margin:20px 0; text-align:center;">
+        <div style="letter-spacing:10px; font-size:36px; font-weight:800;
+                    color:{_BRAND}; line-height:1.2;">
           {otp_code}
-        </span>
+        </div>
+        <p style="margin:10px 0 0 0; color:{_WARN}; font-size:13px; font-weight:600;">
+          Valid for 10 minutes only
+        </p>
       </div>
-      <p style="margin:6px 0 0 0; color:{_WARN}; font-size:13px;
-                font-weight:600; text-align:center;">
-        Valid for 10 minutes only.
-      </p>
       <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
                 line-height:1.6; text-align:center;">
         Never share this code with anyone - Campus Mart Ai staff will
@@ -320,8 +342,8 @@ def send_action_otp_email(
         else "place your order"
     )
     item_line = (
-        f'<p style="margin:0 0 18px 0; color:{_TEXT}; font-size:14px; '
-        f'font-weight:600;">Item: {item_title}</p>'
+        f'<div style="font-size:15px; font-weight:700; color:{_TEXT}; '
+        f'margin:0 0 12px 0;">Item: {item_title}</div>'
         if item_title
         else ""
     )
@@ -336,18 +358,16 @@ def send_action_otp_email(
         Campus Mart Ai:
       </p>
       {item_line}
-      <div style="text-align:center; margin:22px 0;">
-        <span style="display:inline-block; letter-spacing:10px;
-                     font-size:34px; font-weight:800; color:{_BRAND};
-                     background:{_BRAND}14; border:2px dashed {_BRAND};
-                     border-radius:14px; padding:16px 18px 16px 28px;">
+      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                  padding:24px 16px; margin:20px 0; text-align:center;">
+        <div style="letter-spacing:10px; font-size:36px; font-weight:800;
+                    color:{_BRAND}; line-height:1.2;">
           {otp_code}
-        </span>
+        </div>
+        <p style="margin:10px 0 0 0; color:{_WARN}; font-size:13px; font-weight:600;">
+          Valid for 10 minutes only
+        </p>
       </div>
-      <p style="margin:6px 0 0 0; color:{_WARN}; font-size:13px;
-                font-weight:600; text-align:center;">
-        Valid for 10 minutes only.
-      </p>
       <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
                 line-height:1.6; text-align:center;">
         Never share this code with anyone - Campus Mart Ai staff will
@@ -401,11 +421,13 @@ def send_listing_published_email(
     )
 
     rows = (
-        _row("Product", title)
-        + _row("Category", category)
+        _row("Category", category)
         + _row("Condition", condition)
-        + _row("Listed Price", _inr(listed_price))
-        + _row("AI Suggested Fair Price", _inr(suggested_price))
+        + (
+            _row("AI Suggested Fair Price", _inr(suggested_price))
+            if suggested_price
+            else ""
+        )
         + _row("Trust &amp; Safety Status", status_pill)
     )
 
@@ -417,13 +439,20 @@ def send_listing_published_email(
                 line-height:1.6;">
         {status_note}
       </p>
-      {_image_html(image_url)}
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="border:1px solid #e2e8f0; border-radius:12px;
-                    border-collapse:separate; overflow:hidden;">
-        {rows}
-      </table>
-      <p style="margin:18px 0 0 0; color:{_MUTED}; font-size:12px;
+      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                  padding:22px 18px; margin:18px 0; text-align:center;">
+        {_image_html(image_url)}
+        <div style="font-size:18px; font-weight:700; color:{_TEXT}; margin:0 0 6px 0; line-height:1.4;">
+          {title}
+        </div>
+        <div style="font-size:22px; font-weight:800; color:#10b981; margin:0 0 16px 0;">
+          {_inr(listed_price)}
+        </div>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e5e7eb; margin-top:8px;">
+          {rows}
+        </table>
+      </div>
+      <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
                 line-height:1.6;">
         Tip: keep an eye on your Messages tab - buyers can message you
         directly from the listing.
@@ -467,11 +496,9 @@ def _send_sold_to_seller(seller, buyer, product, final_price: float) -> bool:
 
     subject = f"🎉 Sold! '{title}' was purchased on Campus Mart Ai"
     rows = (
-        _row("Item Sold", title)
-        + _row("Condition", condition)
-        + _row("Sale Price", _inr(final_price))
+        _row("Condition", condition)
         + _row("Buyer", buyer_name)
-        + _row("Buyer Email", buyer_email)
+        + _row("Buyer Email", buyer_email or "Not provided")
         + _row(
             "Your Trust Score",
             _pill(
@@ -489,13 +516,20 @@ def _send_sold_to_seller(seller, buyer, product, final_price: float) -> bool:
         A student just bought your listing. Meet up on campus to hand over
         the item, and your trust score just went up for the smooth sale.
       </p>
-      {_image_html(image_url)}
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="border:1px solid #e2e8f0; border-radius:12px;
-                    border-collapse:separate; overflow:hidden;">
-        {rows}
-      </table>
-      <p style="margin:18px 0 0 0; color:{_MUTED}; font-size:12px;
+      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                  padding:22px 18px; margin:18px 0; text-align:center;">
+        {_image_html(image_url)}
+        <div style="font-size:18px; font-weight:700; color:{_TEXT}; margin:0 0 6px 0; line-height:1.4;">
+          {title}
+        </div>
+        <div style="font-size:22px; font-weight:800; color:#10b981; margin:0 0 16px 0;">
+          {_inr(final_price)}
+        </div>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e5e7eb; margin-top:8px;">
+          {rows}
+        </table>
+      </div>
+      <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
                 line-height:1.6;">
         Your listing has been marked <b>Sold</b> and removed from the
         Discover feed automatically.
@@ -516,12 +550,10 @@ def _send_order_to_buyer(seller, buyer, product, final_price: float) -> bool:
 
     subject = f"Order Confirmed: '{title}' on Campus Mart Ai"
     rows = (
-        _row("Item", title)
-        + _row("Category", category)
+        _row("Category", category)
         + _row("Condition", condition)
-        + _row("Price Paid", _inr(final_price))
         + _row("Seller", seller_name)
-        + _row("Seller Email", seller_email)
+        + _row("Seller Email", seller_email or "Not provided")
     )
     body = f"""
       <p style="margin:0 0 14px 0; color:{_TEXT}; font-size:14px;">
@@ -532,16 +564,23 @@ def _send_order_to_buyer(seller, buyer, product, final_price: float) -> bool:
         You bought this item on Campus Mart Ai. Arrange the campus pickup
         with your seller using the in-app Messages tab.
       </p>
-      {_image_html(image_url)}
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="border:1px solid #e2e8f0; border-radius:12px;
-                    border-collapse:separate; overflow:hidden;">
-        {rows}
-      </table>
-      <p style="margin:18px 0 0 0; color:{_MUTED}; font-size:12px;
+      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                  padding:22px 18px; margin:18px 0; text-align:center;">
+        {_image_html(image_url)}
+        <div style="font-size:18px; font-weight:700; color:{_TEXT}; margin:0 0 6px 0; line-height:1.4;">
+          {title}
+        </div>
+        <div style="font-size:22px; font-weight:800; color:#10b981; margin:0 0 16px 0;">
+          {_inr(final_price)}
+        </div>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e5e7eb; margin-top:8px;">
+          {rows}
+        </table>
+      </div>
+      <p style="margin:16px 0 0 0; color:{_MUTED}; font-size:12px;
                 line-height:1.6;">
         Meet in a public campus spot and inspect the item before handing
         over the payment. Happy trading!
       </p>
     """
-    return _send_email(buyer.email, subject, _shell("Order confirmed", body))
+    return _send_email(buyer_email, subject, _shell("Order confirmed", body))

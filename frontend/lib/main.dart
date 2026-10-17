@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import 'dart:convert';
+
+import 'models/call_session.dart';
 import 'providers/auth_provider.dart';
 import 'providers/cart_provider.dart';
 import 'providers/product_provider.dart';
@@ -12,6 +15,7 @@ import 'screens/ai_assistant_screen.dart';
 import 'screens/auth_screen.dart';
 import 'screens/create_listing_screen.dart';
 import 'screens/feed_screen.dart';
+import 'screens/incoming_call_overlay.dart';
 import 'screens/messages_screen.dart';
 import 'screens/profile_screen.dart';
 import 'services/api_service.dart';
@@ -327,6 +331,9 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
   /// (IndexedStack keeps offstage children alive).
   late final List<Widget> _screens;
 
+  static const MethodChannel _notifChannel = MethodChannel('campusmart.ai/notifications');
+  String? _handledCallId;
+
   @override
   void initState() {
     super.initState();
@@ -338,6 +345,41 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
       const MessagesScreen(),
       const ProfileScreen(),
     ];
+    _setupNativeCallListener();
+  }
+
+  void _setupNativeCallListener() {
+    _notifChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onIncomingCallLaunched') {
+        final jsonStr = call.arguments?.toString();
+        if (jsonStr != null && jsonStr.isNotEmpty) {
+          _handleIncomingCallPayload(jsonStr);
+        }
+      }
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        final initialCallJson = await _notifChannel.invokeMethod<String>('getInitialIncomingCall');
+        if (initialCallJson != null && initialCallJson.isNotEmpty) {
+          await _notifChannel.invokeMethod('clearInitialIncomingCall');
+          _handleIncomingCallPayload(initialCallJson);
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _handleIncomingCallPayload(String jsonStr) {
+    try {
+      final auth = context.read<AuthProvider>();
+      if (!auth.isLoggedIn) return;
+      final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final callSession = CallSession.fromJson(map);
+      if (callSession.status == 'ringing' && callSession.id != _handledCallId && mounted) {
+        _handledCallId = callSession.id;
+        IncomingCallOverlay.show(context, call: callSession, token: auth.token);
+      }
+    } catch (_) {}
   }
 
   void _showFeedTab() => setState(() {

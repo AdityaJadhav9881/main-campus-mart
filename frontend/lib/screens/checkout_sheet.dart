@@ -134,15 +134,19 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
       _placeError = null;
     });
     try {
+      final normalizedPayment = (_paymentMethod.toLowerCase().contains('upi') ||
+              _paymentMethod.toLowerCase().contains('gpay'))
+          ? 'gpay_upi'
+          : 'cash_on_meetup';
       final result = await _api.purchaseProduct(
         productId: widget.product.id,
         token: auth.token,
-        deliveryAddress: _address.text,
-        hostelOrLandmark: _landmark.text,
-        contactPhone: _phone.text,
-        paymentMethod: _paymentMethod,
-        upiReference: _upiRef.text,
-        notes: _notes.text,
+        deliveryAddress: _address.text.trim().isEmpty ? 'Campus handover' : _address.text.trim(),
+        hostelOrLandmark: _landmark.text.trim(),
+        contactPhone: _phone.text.trim(),
+        paymentMethod: normalizedPayment,
+        upiReference: _upiRef.text.trim(),
+        notes: _notes.text.trim(),
       );
       if (!mounted) return;
       setState(() {
@@ -179,8 +183,9 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
 
   void _openSellerChat() {
     final result = _result;
-    if (result == null || result.sellerId == null) return;
-    final sellerName = (result.sellerName ?? '').trim();
+    final sellerId = result?.sellerId ?? widget.product.sellerId;
+    if (sellerId.isEmpty) return;
+    final sellerName = (result?.sellerName ?? widget.product.sellerName ?? '').trim();
     // Capture the navigator before popping: the sheet's own context is
     // deactivated the moment the route pops.
     final navigator = Navigator.of(context);
@@ -191,8 +196,8 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
           productId: widget.product.id,
           productTitle: widget.product.title,
           productImageUrl: widget.product.imageUrl,
-          productPrice: result.finalPrice,
-          otherUserId: result.sellerId!,
+          productPrice: result?.finalPrice ?? widget.product.listedPrice,
+          otherUserId: sellerId,
           otherUserName: sellerName.isEmpty ? 'Campus Seller' : sellerName,
         ),
       ),
@@ -576,7 +581,7 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
         ),
         const SizedBox(height: 22),
         FilledButton.icon(
-          onPressed: result?.sellerId == null ? null : _openSellerChat,
+          onPressed: _openSellerChat,
           icon: const Icon(Icons.chat_bubble_outline, size: 17),
           label: const Text('Open Chat with Seller'),
         ),

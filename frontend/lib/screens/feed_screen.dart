@@ -215,9 +215,9 @@ class _FeedScreenState extends State<FeedScreen> {
 
     if (notification is ScrollUpdateNotification) {
       final delta = notification.scrollDelta ?? 0;
-      if (delta > 1.2) {
-        if (pixels > 36) _setChromeVisible(false);
-      } else if (delta < -1.2) {
+      if (delta > 15.0) {
+        if (pixels > 40) _setChromeVisible(false);
+      } else if (delta < -15.0) {
         _setChromeVisible(true);
       }
     }
@@ -630,45 +630,11 @@ class _FeedScreenState extends State<FeedScreen> {
           ],
         ),
       ),
-      body: Column(
-        children: [
-          if (showRecommendations) ...[
-            // Collapses smoothly to zero height while the student scrolls
-            // DOWN, and expands back the moment they scroll UP.
-            AnimatedSize(
-              duration: const Duration(milliseconds: 240),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.topCenter,
-              child: _chromeVisible
-                  ? _AiRecommendationRail(
-                      products: provider.products,
-                      onOpen: _openDetail,
-                    )
-                  : const SizedBox(width: double.infinity),
-            ),
-          ],
-          _buildFilterRow(categories),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 240),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: _chromeVisible
-                ? Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildAcademicFilterRow(),
-                      _buildWantedBoardRail(),
-                    ],
-                  )
-                : const SizedBox(width: double.infinity),
-          ),
-          Expanded(
-            child: NotificationListener<ScrollNotification>(
-              onNotification: _handleScrollNotification,
-              child: _buildBody(provider, visible),
-            ),
-          ),
-        ],
+      body: _buildBody(
+        provider,
+        visible,
+        categories: categories,
+        showRecommendations: showRecommendations,
       ),
     );
   }
@@ -782,11 +748,10 @@ class _FeedScreenState extends State<FeedScreen> {
 
   /// Horizontal academic department and year filter row.
   Widget _buildAcademicFilterRow() {
-    return Container(
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
+      child: Row(
           children: [
             for (final year in _yearOptions) ...[
               Padding(
@@ -873,9 +838,8 @@ class _FeedScreenState extends State<FeedScreen> {
             ],
           ],
         ),
-      ),
-    );
-  }
+      );
+    }
 
   /// Campus Wanted (WTB) request board rail.
   Widget _buildWantedBoardRail() {
@@ -1632,8 +1596,13 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   /// Chooses between the initial loader, the error view, and the
-  /// pull-to-refresh grid / empty states.
-  Widget _buildBody(ProductProvider provider, List<Product> visible) {
+  /// unified pull-to-refresh CustomScrollView.
+  Widget _buildBody(
+    ProductProvider provider,
+    List<Product> visible, {
+    required List<String> categories,
+    required bool showRecommendations,
+  }) {
     // Full-screen loader/error only appears before anything has loaded;
     // once data exists, refreshes keep the grid visible (pull-to-refresh).
     final showLoader = provider.isLoading && provider.products.isEmpty;
@@ -1661,54 +1630,92 @@ class _FeedScreenState extends State<FeedScreen> {
     final noMatches = visible.isEmpty;
     final filtersActive = _category != 'All' || _query.isNotEmpty;
 
-    return RefreshIndicator(
-      color: AppColors.royalBlue,
-      backgroundColor: AppColors.surface,
-      onRefresh: () async {
-        _scheduleWarmup();
-        await provider.loadProducts();
-      },
-      child: noMatches
-          ? _FeedMessage(
-              icon: Icons.search_off_outlined,
-              title: filtersActive ? 'No listings match your filters' : 'No listings here yet',
-              message: filtersActive
-                  ? 'Nothing matches "$_category"$_queryHint right now. '
-                      'Refresh to check for new campus listings.'
-                  : 'Pull down to refresh, or sell the first item!',
-              actionLabel: 'Refresh Feed',
-              onAction: () => _retryFeed(provider),
-              secondaryLabel: 'Clear filters',
-              onSecondaryAction: () {
-                _searchDebounce?.cancel();
-                _searchController.clear();
-                setState(() {
-                  _query = '';
-                  _category = 'All';
-                });
-                context
-                    .read<ProductProvider>()
-                    .loadProducts(query: '', category: '');
-              },
-            )
-          : GridView.builder(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.60,
+    return NotificationListener<ScrollNotification>(
+      onNotification: _handleScrollNotification,
+      child: RefreshIndicator(
+        color: AppColors.royalBlue,
+        backgroundColor: AppColors.surface,
+        onRefresh: () async {
+          _scheduleWarmup();
+          await provider.loadProducts();
+        },
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics(),
+          ),
+          slivers: [
+            if (showRecommendations)
+              SliverToBoxAdapter(
+                child: _AiRecommendationRail(
+                  products: provider.products,
+                  onOpen: _openDetail,
+                ),
               ),
-              itemCount: visible.length,
-              itemBuilder: (context, index) {
-                final product = visible[index];
-                return ProductCard(
-                  product: product,
-                  onTap: () => _openDetail(product),
-                );
-              },
+            SliverToBoxAdapter(
+              child: _buildFilterRow(categories),
             ),
+            SliverToBoxAdapter(
+              child: _buildAcademicFilterRow(),
+            ),
+            SliverToBoxAdapter(
+              child: _buildWantedBoardRail(),
+            ),
+            if (noMatches)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 140),
+                  child: _FeedMessage(
+                    icon: Icons.search_off_outlined,
+                    title: filtersActive
+                        ? 'No listings match your filters'
+                        : 'No listings here yet',
+                    message: filtersActive
+                        ? 'Nothing matches "$_category"$_queryHint right now. '
+                            'Refresh to check for new campus listings.'
+                        : 'Pull down to refresh, or sell the first item!',
+                    actionLabel: 'Refresh Feed',
+                    onAction: () => _retryFeed(provider),
+                    secondaryLabel: 'Clear filters',
+                    onSecondaryAction: () {
+                      _searchDebounce?.cancel();
+                      _searchController.clear();
+                      setState(() {
+                        _query = '';
+                        _category = 'All';
+                      });
+                      context
+                          .read<ProductProvider>()
+                          .loadProducts(query: '', category: '');
+                    },
+                  ),
+                ),
+              )
+            else
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 140),
+                sliver: SliverGrid(
+                  gridDelegate:
+                      const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 0.60,
+                  ),
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                      final product = visible[index];
+                      return ProductCard(
+                        product: product,
+                        onTap: () => _openDetail(product),
+                      );
+                    },
+                    childCount: visible.length,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 

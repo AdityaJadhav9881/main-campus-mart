@@ -11,6 +11,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -32,10 +33,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Persistent Android Foreground Service for CampusMart AI.
+ * Persistent Android Foreground Service for CampusMart AI (Android 14-16 API 34-36).
  *
- * Keeps calls and real-time campus notifications functioning reliably even when
- * the Flutter app is minimized, locked, or swiped away from the recent apps list.
+ * Keeps calls ringing and real-time campus notifications functioning reliably even when
+ * the Flutter app is minimized, screen is locked, or swiped away from the recent apps list.
  */
 class CampusMartBackgroundService : Service() {
 
@@ -43,15 +44,17 @@ class CampusMartBackgroundService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var isRunning = false
     private var lastRingingCallId: String? = null
     private var currentRingtone: Ringtone? = null
 
     companion object {
         const val PERSISTENT_CHANNEL_ID = "campusmart_bg_service"
-        const val CALLS_CHANNEL_ID = "campusmart_calls_and_alerts"
+        const val CALLS_CHANNEL_ID = "campusmart_incoming_calls_v2"
         const val PERSISTENT_NOTIFICATION_ID = 1001
         const val CALL_NOTIFICATION_ID = 1002
+        const val ACTION_DECLINE_CALL = "com.campusmart.campusmart_ai.ACTION_DECLINE_CALL"
 
         fun startService(context: Context) {
             try {
@@ -78,11 +81,20 @@ class CampusMartBackgroundService : Service() {
         super.onCreate()
         try {
             createNotificationChannels()
-            acquireWakeLock()
+            acquireLocks()
         } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_DECLINE_CALL) {
+            val callId = intent.getStringExtra("call_id")
+            dismissIncomingCallAlert()
+            if (!callId.isNullOrEmpty()) {
+                declineCallInBackground(callId)
+            }
+            return START_STICKY
+        }
+
         try {
             val notification = buildPersistentNotification()
             startForeground(PERSISTENT_NOTIFICATION_ID, notification)
@@ -96,11 +108,33 @@ class CampusMartBackgroundService : Service() {
         return START_STICKY
     }
 
+    private fun declineCallInBackground(callId: String) {
+        serviceScope.launch {
+            try {
+                val prefs = getSharedPreferences("campusmart_prefs", Context.MODE_PRIVATE)
+                val apiUrl = prefs.getString("api_base_url", "") ?: ""
+                val token = prefs.getString("user_token", "") ?: ""
+                if (apiUrl.isNotEmpty() && token.isNotEmpty()) {
+                    val root = apiUrl.trimEnd('/')
+                    val url = URL("$root/calls/$callId/decline")
+                    val conn = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        setRequestProperty("Authorization", "Bearer $token")
+                        connectTimeout = 3000
+                        readTimeout = 3000
+                    }
+                    conn.responseCode
+                    conn.disconnect()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-            // 1. Silent low-importance persistent service channel
+            // 1. Silent persistent monitor channel
             val serviceChannel = NotificationChannel(
                 PERSISTENT_CHANNEL_ID,
                 "Campus Network Monitor",
@@ -111,17 +145,20 @@ class CampusMartBackgroundService : Service() {
             }
             manager.createNotificationChannel(serviceChannel)
 
-            // 2. High-importance heads-up call and alert channel
+            // 2. High-importance heads-up incoming call channel
+            val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             val callChannel = NotificationChannel(
                 CALLS_CHANNEL_ID,
-                "CampusMart Calls & Alerts",
-                NotificationManager.IMPORTANCE_HIGH
+                "CampusMart Incoming Calls",
+                NotificationManager.IMPORTANCE_MAX
             ).apply {
-                description = "Incoming voice/video calls and instant buyer notifications"
+                description = "Real-time incoming student voice and video calls"
                 enableVibration(true)
                 enableLights(true)
+                setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 setSound(
-                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                    ringtoneUri,
                     AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
@@ -152,15 +189,29 @@ class CampusMartBackgroundService : Service() {
             .build()
     }
 
-    private fun acquireWakeLock() {
+    private fun acquireLocks() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "CampusMart::BackgroundServiceWakeLock"
+                "CampusMart::BackgroundWakeLock"
             ).apply {
                 setReferenceCounted(false)
-                acquire(10 * 60 * 1000L) // 10 min safe timeout
+                acquire(60 * 60 * 1000L) // 1 hr rolling lock
+            }
+
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiLock = wifiManager?.createWifiLock(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                },
+                "CampusMart::BackgroundWifiLock"
+            )?.apply {
+                setReferenceCounted(false)
+                acquire()
             }
         } catch (_: Exception) {}
     }
@@ -175,19 +226,19 @@ class CampusMartBackgroundService : Service() {
                     val token = prefs.getString("user_token", "") ?: ""
 
                     if (apiUrl.isNotEmpty() && token.isNotEmpty()) {
-                        // 1. Fast incoming call poll (every ~3 seconds)
+                        // 1. Fast 2-second incoming call poll
                         checkIncomingCalls(apiUrl, token)
 
-                        // 2. Notification poll (every ~9 seconds / 3 cycles)
+                        // 2. Notification poll every ~8 seconds (4 cycles)
                         cycleCount++
-                        if (cycleCount >= 3) {
+                        if (cycleCount >= 4) {
                             cycleCount = 0
                             checkNotifications(apiUrl, token)
                         }
                     }
                 } catch (_: Exception) {}
 
-                delay(3000)
+                delay(2000)
             }
         }
     }
@@ -218,7 +269,7 @@ class CampusMartBackgroundService : Service() {
                     if (status == "ringing" && callId.isNotEmpty()) {
                         if (lastRingingCallId != callId) {
                             lastRingingCallId = callId
-                            showIncomingCallAlert(callId, callerName, callType, productTitle)
+                            showIncomingCallAlert(json.toString(), callId, callerName, callType, productTitle)
                         }
                     } else {
                         if (lastRingingCallId != null) {
@@ -266,7 +317,6 @@ class CampusMartBackgroundService : Service() {
                         val isPushed = item.optBoolean("is_pushed", false)
                         val notifType = item.optString("type", "")
 
-                        // Only pop real unpushed, unread notifications (skip incoming_call type as handled above)
                         if (!isRead && !isPushed && notifType != "incoming_call") {
                             val id = (System.currentTimeMillis() and 0x7FFFFFFF).toInt()
                             val title = item.optString("title", "CampusMart Alert")
@@ -280,13 +330,20 @@ class CampusMartBackgroundService : Service() {
         } catch (_: Exception) {}
     }
 
-    private fun showIncomingCallAlert(callId: String, callerName: String, callType: String, productTitle: String) {
+    private fun showIncomingCallAlert(
+        callJson: String,
+        callId: String,
+        callerName: String,
+        callType: String,
+        productTitle: String
+    ) {
         try {
+            // Full screen intent to open MainActivity
             val fullScreenIntent = Intent(this, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("incoming_call", true)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("incoming_call_json", callJson)
                 putExtra("call_id", callId)
                 putExtra("caller_name", callerName)
                 putExtra("call_type", callType)
@@ -299,24 +356,59 @@ class CampusMartBackgroundService : Service() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
 
+            // Accept action button
+            val acceptIntent = Intent(this, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("incoming_call_json", callJson)
+                putExtra("auto_answer", true)
+                putExtra("call_id", callId)
+            }
+            val acceptPendingIntent = PendingIntent.getActivity(
+                this,
+                (callId + "_accept").hashCode(),
+                acceptIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
+            // Decline action button
+            val declineIntent = Intent(this, CampusMartBackgroundService::class.java).apply {
+                action = ACTION_DECLINE_CALL
+                putExtra("call_id", callId)
+            }
+            val declinePendingIntent = PendingIntent.getService(
+                this,
+                (callId + "_decline").hashCode(),
+                declineIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
             val subtext = if (productTitle.isNotEmpty()) " · re: $productTitle" else ""
             val contentText = "$callerName is calling you$subtext"
 
             val notification = NotificationCompat.Builder(this, CALLS_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
-                .setContentTitle("📞 Incoming ${callType.capitalize()} Call")
+                .setContentTitle("📞 Incoming ${callType.replaceFirstChar { it.uppercase() }} Call")
                 .setContentText(contentText)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setFullScreenIntent(fullScreenPendingIntent, true)
                 .setContentIntent(fullScreenPendingIntent)
-                .setAutoCancel(true)
+                .setAutoCancel(false)
                 .setOngoing(true)
+                .addAction(android.R.drawable.ic_menu_call, "Accept", acceptPendingIntent)
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", declinePendingIntent)
                 .build()
 
             NotificationManagerCompat.from(this).notify(CALL_NOTIFICATION_ID, notification)
             startServiceRingtone()
+
+            // Pop up over lockscreen/home if permission allows
+            try {
+                startActivity(fullScreenIntent)
+            } catch (_: Exception) {}
         } catch (_: Exception) {}
     }
 
@@ -395,7 +487,6 @@ class CampusMartBackgroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         try {
-            // AlarmManager restart hook so service respawns if app is swiped away
             val restartServiceIntent = Intent(applicationContext, CampusMartBackgroundService::class.java).apply {
                 setPackage(packageName)
             }
@@ -406,11 +497,19 @@ class CampusMartBackgroundService : Service() {
                 PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
             )
             val alarmService = applicationContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            alarmService.set(
-                AlarmManager.ELAPSED_REALTIME,
-                SystemClock.elapsedRealtime() + 1000,
-                restartServicePendingIntent
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmService.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + 1000,
+                    restartServicePendingIntent
+                )
+            } else {
+                alarmService.setExact(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + 1000,
+                    restartServicePendingIntent
+                )
+            }
         } catch (_: Exception) {}
         super.onTaskRemoved(rootIntent)
     }
@@ -423,8 +522,10 @@ class CampusMartBackgroundService : Service() {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
         } catch (_: Exception) {}
         super.onDestroy()
     }
 }
-
