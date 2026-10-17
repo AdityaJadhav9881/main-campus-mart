@@ -23,8 +23,9 @@ import 'widgets/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await LocalCacheService.init();
-  PermissionService.requestAllAppPermissions();
+  try {
+    await LocalCacheService.init();
+  } catch (_) {}
   runApp(const CampusMartApp());
 }
 
@@ -90,25 +91,13 @@ class _AuthGateState extends State<_AuthGate> {
   Timer? _bootWarmupTimer;
   bool _bootWarmupVisible = false;
   bool _notificationBridgeAttached = false;
-  String? _lastSyncedToken;
-
-  void _syncNativeCredentials(AuthProvider auth) {
-    if (auth.isLoggedIn && auth.token != _lastSyncedToken) {
-      _lastSyncedToken = auth.token;
-      PermissionService.saveNativeCredentials(
-        apiUrl: ApiService.baseUrl,
-        token: auth.token,
-        userId: auth.profile?.id ?? '',
-      );
-    } else if (!auth.isLoggedIn && _lastSyncedToken != null) {
-      _lastSyncedToken = null;
-      PermissionService.stopBackgroundService();
-    }
-  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      PermissionService.requestAllAppPermissions();
+    });
     _bootWarmupTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted) return;
       final auth = context.read<AuthProvider>();
@@ -135,7 +124,6 @@ class _AuthGateState extends State<_AuthGate> {
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
-    _syncNativeCredentials(auth);
 
     return ValueListenableBuilder<bool>(
       valueListenable: ApiService.accessTerminated,

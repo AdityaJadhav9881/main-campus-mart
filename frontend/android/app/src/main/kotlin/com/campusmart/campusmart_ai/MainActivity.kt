@@ -38,7 +38,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        createNotificationChannel()
+        try {
+            createNotificationChannel()
+        } catch (_: Exception) {}
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -71,29 +73,20 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "saveNativeCredentials" -> {
-                    val apiUrl = call.argument<String>("apiUrl") ?: ""
-                    val token = call.argument<String>("token") ?: ""
-                    val userId = call.argument<String>("userId") ?: ""
-                    val prefs = getSharedPreferences("campusmart_prefs", Context.MODE_PRIVATE)
-                    prefs.edit()
-                        .putString("api_base_url", apiUrl)
-                        .putString("user_token", token)
-                        .putString("user_id", userId)
-                        .apply()
-
-                    // Start background service
                     try {
-                        val svcIntent = Intent(this, CampusMartBackgroundService::class.java)
-                        ContextCompat.startForegroundService(this, svcIntent)
+                        val apiUrl = call.argument<String>("apiUrl") ?: ""
+                        val token = call.argument<String>("token") ?: ""
+                        val userId = call.argument<String>("userId") ?: ""
+                        val prefs = getSharedPreferences("campusmart_prefs", Context.MODE_PRIVATE)
+                        prefs.edit()
+                            .putString("api_base_url", apiUrl)
+                            .putString("user_token", token)
+                            .putString("user_id", userId)
+                            .apply()
                     } catch (_: Exception) {}
-
                     result.success(true)
                 }
                 "stopBackgroundService" -> {
-                    try {
-                        val svcIntent = Intent(this, CampusMartBackgroundService::class.java)
-                        stopService(svcIntent)
-                    } catch (_: Exception) {}
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -144,35 +137,37 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requestAllPermissions() {
-        val permissionsToRequest = mutableListOf<String>()
+        try {
+            val permissionsToRequest = mutableListOf<String>()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
+                    permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+                }
+            } else {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
-            }
-        } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            }
-        }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.CAMERA)
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
-        }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.CAMERA)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
+            }
 
-        if (permissionsToRequest.isNotEmpty()) {
-            ActivityCompat.requestPermissions(
-                this,
-                permissionsToRequest.toTypedArray(),
-                9002
-            )
-        }
+            if (permissionsToRequest.isNotEmpty()) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    permissionsToRequest.toTypedArray(),
+                    9002
+                )
+            }
+        } catch (_: Exception) {}
     }
 
     private fun startRinging() {
@@ -222,21 +217,19 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun showNotification(id: Int, title: String, body: String) {
-        if (!isNotificationPermissionGranted()) {
-            requestNotificationPermission()
-        }
-        val builder = NotificationCompat.Builder(this, notificationChannelId)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
         try {
+            if (!isNotificationPermissionGranted()) {
+                requestNotificationPermission()
+            }
+            val builder = NotificationCompat.Builder(this, notificationChannelId)
+                .setSmallIcon(android.R.drawable.stat_notify_chat)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
             NotificationManagerCompat.from(this).notify(id, builder.build())
-        } catch (_: SecurityException) {
-            // Permission revoked mid-session
-        }
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
