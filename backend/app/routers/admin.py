@@ -71,6 +71,7 @@ from ..models import (
 from ..schemas import (
     AdminCommunicationsResponse,
     AdminCommunicationMessage,
+    AdminCommunicationOrder,
     AdminCommunicationProduct,
     AdminCommunicationThread,
     AdminCommunicationUser,
@@ -871,6 +872,18 @@ def intervene_in_thread(
 # =============================================================================
 # Communications monitor (buyer <-> seller threads)
 # =============================================================================
+def _is_call_bubble(text: str) -> bool:
+    return text.startswith("📞") or "CALL" in text.upper()
+
+
+def _is_order_bubble(text: str) -> bool:
+    return text.startswith("📦") or "NEW ORDER PLACED" in text.upper()
+
+
+def _is_admin_bubble(text: str) -> bool:
+    return text.startswith("📢") or "OFFICIAL" in text.upper()
+
+
 def _communication_user(user: User | None, user_id: UUID) -> AdminCommunicationUser:
     """Nested thread participant with college gaps filled."""
     if user is None:
@@ -891,8 +904,8 @@ def _communication_user(user: User | None, user_id: UUID) -> AdminCommunicationU
         email=user.email,
         college_name=college_name,
         college_code=college_code,
-        trust_score=user.trust_score,
-        status=user.status,
+        trust_score=float(user.trust_score or 0.0),
+        status=user.status or "active",
     )
 
 
@@ -914,7 +927,11 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
     """
     messages = (
         db.query(ChatMessage)
-        .options(joinedload(ChatMessage.product))
+        .options(
+            joinedload(ChatMessage.product),
+            joinedload(ChatMessage.sender),
+            joinedload(ChatMessage.receiver),
+        )
         .order_by(ChatMessage.created_at.asc())
         .all()
     )
@@ -922,8 +939,8 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
         db.query(Transaction).order_by(Transaction.timestamp.asc()).all()
     )
 
-    product_ids = {m.product_id for m in messages} | {
-        t.product_id for t in transactions
+    product_ids = {m.product_id for m in messages if m.product_id} | {
+        t.product_id for t in transactions if t.product_id
     }
     if not product_ids:
         return AdminCommunicationsResponse(threads=[], count=0)
@@ -935,6 +952,8 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
         .filter(Product.id.in_(product_ids))
         .all()
     }
+    if not products:
+        return AdminCommunicationsResponse(threads=[], count=0)
 
     # (product_id, buyer_id, seller_id) -> {"messages": [...], "transaction": t}
     threads: dict[tuple[UUID, UUID, UUID], dict] = {}
@@ -943,23 +962,27 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
         product = products.get(message.product_id)
         if product is None:
             continue
-        participants = {message.sender_id, message.receiver_id}
-        if product.seller_id in participants:
-            buyer_id = next(
-                uid for uid in participants if uid != product.seller_id
-            )
-        else:
-            # Neither side is the current seller (account churn); treat the
-            # receiver as the buyer so the thread still surfaces.
+        seller_id = product.seller_id
+        if seller_id == message.sender_id:
             buyer_id = message.receiver_id
-        key = (product.id, buyer_id, product.seller_id)
+        elif seller_id == message.receiver_id:
+            buyer_id = message.sender_id
+        else:
+            # Neither side is the current seller (e.g. admin intervention or account churn);
+            # treat the receiver as the buyer so the message appears in the student's thread.
+            buyer_id = message.receiver_id
+            if seller_id is None:
+                seller_id = message.sender_id
+        if seller_id is None:
+            continue
+        key = (product.id, buyer_id, seller_id)
         threads.setdefault(key, {"messages": [], "transaction": None})[
             "messages"
         ].append(message)
 
     for transaction in transactions:
         product = products.get(transaction.product_id)
-        if product is None:
+        if product is None or product.seller_id is None:
             continue
         key = (transaction.product_id, transaction.buyer_id, product.seller_id)
         entry = threads.setdefault(key, {"messages": [], "transaction": None})
@@ -969,6 +992,12 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
     for _, buyer_id, seller_id in threads:
         participant_ids.add(buyer_id)
         participant_ids.add(seller_id)
+    for m in messages:
+        if m.sender_id:
+            participant_ids.add(m.sender_id)
+        if m.receiver_id:
+            participant_ids.add(m.receiver_id)
+
     users = (
         {
             user.id: user
@@ -980,11 +1009,13 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
 
     result: list[AdminCommunicationThread] = []
     for (product_id, buyer_id, seller_id), entry in threads.items():
-        product = products[product_id]
+        product = products.get(product_id)
+        if product is None:
+            continue
         thread_messages = sorted(
             entry["messages"], key=lambda m: (m.created_at, str(m.id))
         )
-        transaction = entry["transaction"]
+        transaction: Transaction | None = entry["transaction"]
 
         last_updated = (
             thread_messages[-1].created_at
@@ -1002,6 +1033,25 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
         else:
             last_message = "Order placed (no messages)"
 
+        order_status = (
+            (transaction.order_status or transaction.status)
+            if transaction
+            else None
+        )
+        order_obj = (
+            AdminCommunicationOrder(
+                id=transaction.id,
+                order_id=transaction.id,
+                delivery_address=transaction.delivery_address,
+                contact_phone=transaction.contact_phone,
+                payment_method=transaction.payment_method,
+                order_status=order_status,
+                final_price=transaction.final_price,
+            )
+            if transaction
+            else None
+        )
+
         result.append(
             AdminCommunicationThread(
                 id=f"{product_id}:{buyer_id}:{seller_id}",
@@ -1010,6 +1060,7 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
                 product=AdminCommunicationProduct(
                     id=product.id,
                     title=product.title,
+                    price=product.listed_price,
                     listed_price=product.listed_price,
                     suggested_price=product.suggested_price,
                     image_url=product.image_url,
@@ -1021,7 +1072,7 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
                 call_count=sum(
                     1
                     for m in thread_messages
-                    if (m.message or "").startswith("📞")
+                    if _is_call_bubble(m.message or "")
                 ),
                 has_order=transaction is not None,
                 payment_method=(
@@ -1030,17 +1081,26 @@ def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsRes
                 delivery_address=(
                     transaction.delivery_address if transaction else None
                 ),
+                order_status=order_status,
+                order=order_obj,
                 last_message=last_message,
                 last_updated=last_updated,
                 messages=[
                     AdminCommunicationMessage(
                         id=m.id,
                         sender_id=m.sender_id,
-                        sender_name=m.sender.name if m.sender else "",
+                        sender_name=(
+                            users[m.sender_id].name
+                            if m.sender_id in users
+                            else (m.sender.name if m.sender else "Student")
+                        ),
                         receiver_id=m.receiver_id,
                         message=m.message or "",
                         image_url=m.image_url,
                         created_at=m.created_at,
+                        is_call_log=_is_call_bubble(m.message or ""),
+                        is_order_card=_is_order_bubble(m.message or ""),
+                        is_admin_note=_is_admin_bubble(m.message or ""),
                     )
                     for m in thread_messages
                 ],

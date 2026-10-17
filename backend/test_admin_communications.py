@@ -287,6 +287,7 @@ def test_communications_thread_with_order_and_call(client):
     assert thread["product"]["id"] == listing["id"]
     assert thread["product"]["title"] == "Gaming Mouse"
     assert thread["product"]["listed_price"] == 900.0
+    assert thread["product"]["price"] == 900.0
     assert thread["product"]["status"] == "sold"
     assert thread["product"]["college_name"] == COEP
 
@@ -295,6 +296,10 @@ def test_communications_thread_with_order_and_call(client):
     assert thread["has_order"] is True
     assert thread["payment_method"] == "gpay_upi"
     assert thread["delivery_address"] == "Hostel B-204, COEP Campus"
+    assert thread["order_status"] == "Requested / Processing"
+    assert thread["order"] is not None
+    assert thread["order"]["delivery_address"] == "Hostel B-204, COEP Campus"
+    assert thread["order"]["final_price"] == 900.0
     assert thread["last_message"].startswith("📦 NEW ORDER PLACED")
     assert (
         thread["last_updated"] >= thread["messages"][-1]["created_at"]
@@ -306,10 +311,13 @@ def test_communications_thread_with_order_and_call(client):
     assert messages[0]["sender_name"] == "Priya Buyer"
     assert messages[0]["sender_id"] == buyer_id
     assert messages[0]["receiver_id"] == seller_id
+    assert messages[0]["is_call_log"] is False
     assert messages[1]["message"].startswith("Yes - dongle")
     assert messages[1]["sender_name"] == "Arjun Seller"
     assert messages[2]["message"].startswith("📞 Voice call")
     assert messages[2]["sender_id"] == buyer_id
+    assert messages[2]["is_call_log"] is True
+    assert messages[3]["is_order_card"] is True
 
 
 def test_communications_chat_only_thread(client):

@@ -624,11 +624,24 @@ class AdminCommunicationProduct(BaseModel):
 
     id: UUID
     title: str
+    price: float = 0.0
     listed_price: float
     suggested_price: float | None = None
     image_url: str | None = None
     status: str
     college_name: str = ""
+
+
+class AdminCommunicationOrder(BaseModel):
+    """Structured order snapshot for the thread."""
+
+    id: UUID | str
+    order_id: UUID | str | None = None
+    delivery_address: str | None = None
+    contact_phone: str | None = None
+    payment_method: str | None = None
+    order_status: str | None = None
+    final_price: float | None = None
 
 
 class AdminCommunicationMessage(BaseModel):
@@ -641,6 +654,9 @@ class AdminCommunicationMessage(BaseModel):
     message: str
     image_url: str | None = None
     created_at: datetime
+    is_call_log: bool = False
+    is_order_card: bool = False
+    is_admin_note: bool = False
 
 
 class AdminCommunicationThread(BaseModel):
@@ -659,6 +675,8 @@ class AdminCommunicationThread(BaseModel):
     has_order: bool
     payment_method: str | None = None
     delivery_address: str | None = None
+    order_status: str | None = None
+    order: AdminCommunicationOrder | None = None
     last_message: str
     last_updated: datetime
     messages: list[AdminCommunicationMessage]
