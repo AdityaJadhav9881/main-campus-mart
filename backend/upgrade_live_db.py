@@ -124,7 +124,9 @@ def report(engine_) -> dict:
         rescale_done = safe(db, "rescale marker ", lambda: (
             db.get(SystemConfig, RESCALE_MARKER_KEY) is not None))
         super_admin = safe(db, "super-admin    ", lambda: db.scalar(
-            select(User).where(func.lower(User.email) == SUPER_ADMIN_EMAIL)))
+            select(User).where(
+                func.lower(User.email).in_([e.lower() for e in SUPER_ADMIN_EMAILS])
+            )))
 
     if isinstance(price_row, tuple):
         price_min, price_max, price_avg = price_row
