@@ -7,8 +7,8 @@ plugins {
 
 android {
     namespace = "com.campusmart.campusmart_ai"
-    // 35: flutter_plugin_android_lifecycle (transitive) requires compile SDK 35.
-    compileSdk = 35
+    // 36: flutter_webrtc requires compile SDK 36.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -39,6 +39,16 @@ android {
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.debug
         }
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ["**/*.ini", "**/desktop.ini"]
+        }
+    }
+
+    aaptOptions {
+        ignoreAssetsPattern "!desktop.ini"
     }
 }
 
