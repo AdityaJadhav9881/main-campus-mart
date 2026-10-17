@@ -454,6 +454,78 @@ class AdminOverviewResponse(BaseModel):
     flagged_items: list[AdminListingRead]
 
 
+# =============================================================================
+# Admin communications monitor (buyer <-> seller threads)
+# =============================================================================
+class AdminCommunicationUser(BaseModel):
+    """One side of a buyer<->seller communication thread."""
+
+    id: UUID
+    name: str
+    email: str
+    college_name: str = Field(
+        default="",
+        description="Real college when the student set one, else a "
+                    "deterministic CET default so the dashboard never shows "
+                    "blanks for legacy accounts.",
+    )
+    college_code: str = ""
+    trust_score: float = 0.0
+    status: str = "active"
+
+
+class AdminCommunicationProduct(BaseModel):
+    """The listing a communication thread is about."""
+
+    id: UUID
+    title: str
+    listed_price: float
+    suggested_price: float | None = None
+    image_url: str | None = None
+    status: str
+    college_name: str = ""
+
+
+class AdminCommunicationMessage(BaseModel):
+    """One chat message inside a thread (calls arrive as text bubbles)."""
+
+    id: UUID
+    sender_id: UUID
+    sender_name: str
+    receiver_id: UUID
+    message: str
+    image_url: str | None = None
+    created_at: datetime
+
+
+class AdminCommunicationThread(BaseModel):
+    """A (product, buyer, seller) conversation with order context."""
+
+    id: str = Field(
+        description="Composite 'product:buyer:seller' thread key.",
+    )
+    buyer: AdminCommunicationUser
+    seller: AdminCommunicationUser
+    product: AdminCommunicationProduct
+    message_count: int
+    call_count: int = Field(
+        description="Voice/video call bubbles ('📞 ...') inside the thread.",
+    )
+    has_order: bool
+    payment_method: str | None = None
+    delivery_address: str | None = None
+    last_message: str
+    last_updated: datetime
+    messages: list[AdminCommunicationMessage]
+
+
+class AdminCommunicationsResponse(BaseModel):
+    """GET /admin/communications body - newest activity first."""
+
+    threads: list[AdminCommunicationThread]
+    count: int
+
+
 class AgentFlagUpdate(BaseModel):
     """Request body for PATCH /admin/ai-agents/{agent_key}."""
 

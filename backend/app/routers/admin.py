@@ -9,6 +9,7 @@ Live Admin Master Control endpoints for the React Admin Dashboard (Phase 7).
     GET  /admin/listings                     - ALL products + seller denormalization
     PATCH /admin/listings/{product_id}/approve - unflag + trust bump (+0.2, cap 5.0)
     DELETE /admin/listings/{product_id}      - delete + trust penalty (-0.8, floor 0.0)
+    GET  /admin/communications               - buyer<->seller threads + order context
     GET  /admin/ai-agents                    - runtime agent flags
     PATCH /admin/ai-agents/{agent_key}       - toggle an agent on/off
     GET  /admin/ai-config                    - Vision-AI config + key pool (masked)
@@ -39,9 +40,15 @@ from ..ai.orchestrator import (
     set_agent_enabled,
 )
 from ..auth import is_super_admin, require_admin_access
+from ..cet_colleges import get_college_by_code
 from ..database import get_db
-from ..models import Product, User
+from ..models import ChatMessage, Product, Transaction, User
 from ..schemas import (
+    AdminCommunicationsResponse,
+    AdminCommunicationMessage,
+    AdminCommunicationProduct,
+    AdminCommunicationThread,
+    AdminCommunicationUser,
     AdminListingRead,
     AdminOverviewResponse,
     AdminUserStatusUpdate,
@@ -64,8 +71,73 @@ router = APIRouter(
 )
 
 
+# =============================================================================
+# College display defaults (admin views only)
+# =============================================================================
+# Legacy accounts/listings predate the college network and carry NULL college
+# fields, which read as blanks in the dashboard. Admin views fill those gaps
+# with a REAL CET college chosen deterministically from the account UUID, so
+# the same student always shows the same campus (stable across reloads) and
+# the data stays plausible while the fleet backfills its profiles.
+_DEFAULT_COLLEGE_CODES: tuple[str, ...] = (
+    "6006",  # COEP Technological University, Pune
+    "3012",  # VJTI, Mumbai
+    "6271",  # PICT, Pune
+    "6005",  # Government College of Engineering, Karad
+    "5121",  # K. K. Wagh, Nashik
+    "4115",  # RCOEM, Nagpur
+    "1002",  # Government College of Engineering, Amravati
+    "6273",  # VIT, Pune
+    "3035",  # K. J. Somaiya College of Engineering, Mumbai
+    "4149",  # YCCE, Nagpur
+)
+
+
+def _default_college(owner_id: UUID) -> tuple[str, str]:
+    """Deterministic display college for a NULL-college account/listing."""
+    code = _DEFAULT_COLLEGE_CODES[owner_id.int % len(_DEFAULT_COLLEGE_CODES)]
+    college = get_college_by_code(code)
+    if college is None:  # defensive: catalog always resolves its own codes
+        return "COEP Technological University, Pune", "6006"
+    return college.name, college.code
+
+
+def _effective_college(user: User | None, fallback_id: UUID) -> tuple[str, str]:
+    """The student's real college, or the deterministic default."""
+    if user is not None:
+        name = (user.college_name or "").strip()
+        code = (user.college_code or "").strip()
+        if name or code:
+            return name, code
+    return _default_college(fallback_id)
+
+
+def _admin_user(user: User) -> UserRead:
+    """Serialize a user for dashboard views (college gaps filled)."""
+    college_name, college_code = _effective_college(user, user.id)
+    return UserRead(
+        id=user.id,
+        firebase_uid=user.firebase_uid,
+        name=user.name,
+        email=user.email,
+        status=user.status,
+        trust_score=user.trust_score,
+        college_name=college_name,
+        college_code=college_code,
+        created_at=user.created_at,
+    )
+
+
 def _admin_listing(product: Product) -> AdminListingRead:
     """Serialize a Product with its seller denormalized for the dashboard."""
+    college_name = product.college_name
+    college_code = product.college_code
+    if not (college_name or college_code):
+        # Inherit the seller's campus (real or deterministic default) so a
+        # listing and its owner never show different colleges.
+        college_name, college_code = _effective_college(
+            product.seller, product.seller_id
+        )
     return AdminListingRead(
         id=product.id,
         seller_id=product.seller_id,
@@ -81,8 +153,8 @@ def _admin_listing(product: Product) -> AdminListingRead:
         listed_price=product.listed_price,
         status=product.status,
         trust_reason=product.trust_reason,
-        college_name=product.college_name,
-        college_code=product.college_code,
+        college_name=college_name,
+        college_code=college_code,
         created_at=product.created_at,
         seller_name=product.seller.name if product.seller else None,
         seller_email=product.seller.email if product.seller else None,
@@ -139,9 +211,10 @@ def overview(db: Session = Depends(get_db)) -> AdminOverviewResponse:
     response_model=list[UserRead],
     summary="List all users",
 )
-def list_users(db: Session = Depends(get_db)) -> list[User]:
+def list_users(db: Session = Depends(get_db)) -> list[UserRead]:
     """Every student account, newest first (includes blocked + status)."""
-    return db.query(User).order_by(User.created_at.desc()).all()
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    return [_admin_user(user) for user in users]
 
 
 @router.patch(
@@ -153,7 +226,7 @@ def update_user_status(
     user_id: UUID,
     payload: AdminUserStatusUpdate,
     db: Session = Depends(get_db),
-) -> User:
+) -> UserRead:
     """Set user.status to 'blocked' or 'active'.
 
     Blocked users immediately receive 403 on listing creation, image upload,
@@ -183,7 +256,7 @@ def update_user_status(
     db.commit()
     db.refresh(user)
     logger.warning("Admin: user %s status -> %s", user.email, user.status)
-    return user
+    return _admin_user(user)
 
 
 # =============================================================================
@@ -282,6 +355,189 @@ def delete_listing(product_id: UUID, db: Session = Depends(get_db)) -> None:
             detail="Cannot delete a listing with existing purchase history.",
         ) from exc
     logger.warning("Admin: listing '%s' deleted", product_id)
+
+
+# =============================================================================
+# Communications monitor (buyer <-> seller threads)
+# =============================================================================
+def _communication_user(user: User | None, user_id: UUID) -> AdminCommunicationUser:
+    """Nested thread participant with college gaps filled."""
+    if user is None:
+        college_name, college_code = _default_college(user_id)
+        return AdminCommunicationUser(
+            id=user_id,
+            name="Deleted student",
+            email="",
+            college_name=college_name,
+            college_code=college_code,
+            trust_score=0.0,
+            status="deleted",
+        )
+    college_name, college_code = _effective_college(user, user.id)
+    return AdminCommunicationUser(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        college_name=college_name,
+        college_code=college_code,
+        trust_score=user.trust_score,
+        status=user.status,
+    )
+
+
+@router.get(
+    "/communications",
+    response_model=AdminCommunicationsResponse,
+    summary="Every buyer<->seller thread with order context",
+)
+def list_communications(db: Session = Depends(get_db)) -> AdminCommunicationsResponse:
+    """Aggregate chat_messages + transactions into communication threads.
+
+    A thread is one (product, buyer, seller) conversation: every message on
+    the product between the buyer and the seller's accounts, plus the order
+    record when the purchase went through (payment method, delivery address).
+    `call_count` counts the call bubbles the in-app phone writes into chat.
+    Threads are ordered by most recent activity; nested users carry their
+    college (real or deterministic default) so the dashboard never renders
+    blank campuses.
+    """
+    messages = (
+        db.query(ChatMessage)
+        .options(joinedload(ChatMessage.product))
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    transactions = (
+        db.query(Transaction).order_by(Transaction.timestamp.asc()).all()
+    )
+
+    product_ids = {m.product_id for m in messages} | {
+        t.product_id for t in transactions
+    }
+    if not product_ids:
+        return AdminCommunicationsResponse(threads=[], count=0)
+
+    products = {
+        product.id: product
+        for product in db.query(Product)
+        .options(joinedload(Product.seller))
+        .filter(Product.id.in_(product_ids))
+        .all()
+    }
+
+    # (product_id, buyer_id, seller_id) -> {"messages": [...], "transaction": t}
+    threads: dict[tuple[UUID, UUID, UUID], dict] = {}
+
+    for message in messages:
+        product = products.get(message.product_id)
+        if product is None:
+            continue
+        participants = {message.sender_id, message.receiver_id}
+        if product.seller_id in participants:
+            buyer_id = next(
+                uid for uid in participants if uid != product.seller_id
+            )
+        else:
+            # Neither side is the current seller (account churn); treat the
+            # receiver as the buyer so the thread still surfaces.
+            buyer_id = message.receiver_id
+        key = (product.id, buyer_id, product.seller_id)
+        threads.setdefault(key, {"messages": [], "transaction": None})[
+            "messages"
+        ].append(message)
+
+    for transaction in transactions:
+        product = products.get(transaction.product_id)
+        if product is None:
+            continue
+        key = (transaction.product_id, transaction.buyer_id, product.seller_id)
+        entry = threads.setdefault(key, {"messages": [], "transaction": None})
+        entry["transaction"] = transaction  # ascending order -> latest wins
+
+    participant_ids: set[UUID] = set()
+    for _, buyer_id, seller_id in threads:
+        participant_ids.add(buyer_id)
+        participant_ids.add(seller_id)
+    users = (
+        {
+            user.id: user
+            for user in db.query(User).filter(User.id.in_(participant_ids)).all()
+        }
+        if participant_ids
+        else {}
+    )
+
+    result: list[AdminCommunicationThread] = []
+    for (product_id, buyer_id, seller_id), entry in threads.items():
+        product = products[product_id]
+        thread_messages = sorted(
+            entry["messages"], key=lambda m: (m.created_at, str(m.id))
+        )
+        transaction = entry["transaction"]
+
+        last_updated = (
+            thread_messages[-1].created_at
+            if thread_messages
+            else transaction.timestamp
+        )
+        if transaction is not None and transaction.timestamp > last_updated:
+            last_updated = transaction.timestamp
+
+        if thread_messages:
+            last = thread_messages[-1]
+            last_message = (last.message or "").strip() or (
+                "📷 Photo" if last.image_url else ""
+            )
+        else:
+            last_message = "Order placed (no messages)"
+
+        result.append(
+            AdminCommunicationThread(
+                id=f"{product_id}:{buyer_id}:{seller_id}",
+                buyer=_communication_user(users.get(buyer_id), buyer_id),
+                seller=_communication_user(users.get(seller_id), seller_id),
+                product=AdminCommunicationProduct(
+                    id=product.id,
+                    title=product.title,
+                    listed_price=product.listed_price,
+                    suggested_price=product.suggested_price,
+                    image_url=product.image_url,
+                    status=product.status,
+                    college_name=(product.college_name or "").strip()
+                    or _effective_college(product.seller, product.seller_id)[0],
+                ),
+                message_count=len(thread_messages),
+                call_count=sum(
+                    1
+                    for m in thread_messages
+                    if (m.message or "").startswith("📞")
+                ),
+                has_order=transaction is not None,
+                payment_method=(
+                    transaction.payment_method if transaction else None
+                ),
+                delivery_address=(
+                    transaction.delivery_address if transaction else None
+                ),
+                last_message=last_message,
+                last_updated=last_updated,
+                messages=[
+                    AdminCommunicationMessage(
+                        id=m.id,
+                        sender_id=m.sender_id,
+                        sender_name=m.sender.name if m.sender else "",
+                        receiver_id=m.receiver_id,
+                        message=m.message or "",
+                        image_url=m.image_url,
+                        created_at=m.created_at,
+                    )
+                    for m in thread_messages
+                ],
+            )
+        )
+
+    result.sort(key=lambda thread: thread.last_updated, reverse=True)
+    return AdminCommunicationsResponse(threads=result, count=len(result))
 
 
 # =============================================================================
