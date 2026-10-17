@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -414,9 +414,9 @@ class _CollegeNetworkCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(
                     [
-                      if (code.isNotEmpty) 'CET $code',
+                      if (code.isNotEmpty) 'Code $code',
                       'You get alerts when students at your college post.',
-                    ].join(' Â· '),
+                    ].join(' • '),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -1047,7 +1047,7 @@ class _AboutCard extends StatelessWidget {
                 ),
                 SizedBox(width: 10),
                 Text(
-                  'CET Cell Campus Network',
+                  'Verified Campus Network',
                   style: TextStyle(
                     color: AppColors.textPrimary,
                     fontSize: 13,
