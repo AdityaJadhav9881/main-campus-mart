@@ -119,9 +119,8 @@ PROVIDER_BASE_URLS: dict[str, str] = {
     "cerebras": "https://api.cerebras.ai/v1",
 }
 
-# Per-request network budget. Vision calls move real bytes, so this is more
-# generous than a plain API timeout (Render cold starts included).
-HTTP_TIMEOUT = httpx.Timeout(60.0, connect=15.0)
+# Per-request network budget capped tightly for fast failover and response.
+HTTP_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
 # Never inline more than ~7 MB per photo (uploads are capped at 5 MB anyway).
 MAX_IMAGE_BYTES = 7 * 1024 * 1024
 
@@ -793,47 +792,37 @@ def _invoke_vision_llm(
 
     if provider == "gemini":
         last_exc: Exception | None = None
-        for model_name in gemini_model_chain(config["ai_model"]):
-            for with_tools in (True, False):
-                try:
-                    payload = _post_json(
-                        _gemini_url(config["ai_base_url"], model_name, api_key),
-                        headers={"Content-Type": "application/json"},
-                        body=_gemini_body(
-                            prompt, images, with_search_tools=with_tools
-                        ),
-                    )
-                    return _gemini_text(payload), model_name
-                except Exception as exc:
-                    last_exc = exc
-                    if _model_missing(exc):
-                        logger.warning(
-                            "Gemini model %s does not exist (%s); next fallback",
-                            model_name,
-                            exc,
-                        )
-                        break
-                    if with_tools:
-                        logger.warning(
-                            "Gemini vision %s with search tools failed: %s; "
-                            "retrying without tools",
-                            model_name,
-                            exc,
-                        )
-                        continue
+        for model_name in gemini_model_chain(config["ai_model"])[:2]:
+            try:
+                payload = _post_json(
+                    _gemini_url(config["ai_base_url"], model_name, api_key),
+                    headers={"Content-Type": "application/json"},
+                    body=_gemini_body(
+                        prompt, images, with_search_tools=False
+                    ),
+                )
+                return _gemini_text(payload), model_name
+            except Exception as exc:
+                last_exc = exc
+                if _model_missing(exc):
                     logger.warning(
-                        "Gemini vision model %s failed: %s; trying next fallback",
+                        "Gemini model %s does not exist (%s); next fallback",
                         model_name,
                         exc,
                     )
-                    break
+                    continue
+                logger.warning(
+                    "Gemini vision model %s failed: %s; trying next fallback",
+                    model_name,
+                    exc,
+                )
         if last_exc:
             raise last_exc
 
     base = (config["ai_base_url"] or PROVIDER_BASE_URLS.get(provider, "")).rstrip("/")
     body = _openai_body(prompt, images)
     last_exc: Exception | None = None
-    for model in _openai_compatible_models(provider, config["ai_model"]):
+    for model in _openai_compatible_models(provider, config["ai_model"])[:2]:
         body["model"] = model
         try:
             payload = _post_json(
@@ -903,44 +892,25 @@ def _invoke_text_llm(
         contents.append({"role": "user", "parts": user_parts})
 
         last_exc: Exception | None = None
-        for model_name in gemini_model_chain(config["ai_model"]):
-            for with_tools in (True, False):
-                body: dict[str, Any] = {
-                    "contents": contents,
-                    "generationConfig": {"temperature": temperature},
-                }
-                if with_tools:
-                    body["tools"] = [{"google_search": {}}]
-                try:
-                    payload = _post_json(
-                        _gemini_url(config["ai_base_url"], model_name, api_key),
-                        headers={"Content-Type": "application/json"},
-                        body=body,
-                    )
-                    return _gemini_text(payload), model_name
-                except Exception as exc:
-                    last_exc = exc
-                    if _model_missing(exc):
-                        logger.warning(
-                            "Gemini model %s does not exist (%s); next fallback",
-                            model_name,
-                            exc,
-                        )
-                        break
-                    if with_tools:
-                        logger.warning(
-                            "Gemini chat %s with search tools failed: %s; "
-                            "retrying without tools",
-                            model_name,
-                            exc,
-                        )
-                        continue
-                    logger.warning(
-                        "Gemini text model %s failed: %s; trying next fallback",
-                        model_name,
-                        exc,
-                    )
-                    break
+        for model_name in gemini_model_chain(config["ai_model"])[:2]:
+            body: dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {"temperature": temperature},
+            }
+            try:
+                payload = _post_json(
+                    _gemini_url(config["ai_base_url"], model_name, api_key),
+                    headers={"Content-Type": "application/json"},
+                    body=body,
+                )
+                return _gemini_text(payload), model_name
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Gemini text model %s failed: %s",
+                    model_name,
+                    exc,
+                )
         if last_exc:
             raise last_exc
 
@@ -1179,7 +1149,8 @@ def analyze_listing_images(
         if condition:
             hint += f"\n* seller-declared condition: {condition}"
 
-    keys = key_pool_engine.select_ordered_keys(db, "vision")
+    raw_keys = key_pool_engine.select_ordered_keys(db, "vision")
+    keys = [k for k in raw_keys if key_pool_engine._is_valid_key_candidate(k)]
     try:
         images = _gather_images(image_urls)
     except Exception:  # noqa: BLE001 - photos unreadable -> deterministic plan B
@@ -1318,7 +1289,8 @@ def analyze_web_estimator_item(
         title=title, image_urls=urls, images=images
     )
 
-    keys = key_pool_engine.select_ordered_keys(db, "vision")
+    raw_keys = key_pool_engine.select_ordered_keys(db, "vision")
+    keys = [k for k in raw_keys if key_pool_engine._is_valid_key_candidate(k)]
     if not keys and is_screenshot:
         return {
             "is_valid_product": False,
@@ -1503,60 +1475,15 @@ def chat_completion(
     temperature: float = 0.5,
     image_url: str | None = None,
 ) -> str:
-    """Chat completion for the Ask CampusMart AI assistant.
-
-    `image_url` (optional) attaches ONE student photo so the assistant can
-    inspect it (recognize the item, spot wear, suggest a campus price).
-
-    Attempts every eligible pool key in routing order; raises only when the
-    pool is empty or every key failed - callers then fall back to the local
-    catalog assistant.
-    """
-    keys = key_pool_engine.select_ordered_keys(db, "chat")
-    if not keys:
-        raise RuntimeError("No AI API key configured")
-
-    images: list[dict[str, Any]] = []
-    if image_url:
-        try:
-            images = _gather_images([image_url])
-        except Exception:  # noqa: BLE001 - answer with text rather than fail
-            logger.warning(
-                "vision_master: could not fetch chat photo %s; "
-                "answering without it",
-                image_url,
-            )
-
-    last_exc: Exception | None = None
-    for key in keys:
-        config = key_pool_engine.build_provider_config(key)
-        started = time.monotonic()
-        try:
-            text, _model = _invoke_text_llm(
-                config,
-                system,
-                history,
-                user_message,
-                temperature=temperature,
-                images=images,
-            )
-            key_pool_engine.mark_success(
-                key.id, latency_ms=(time.monotonic() - started) * 1000
-            )
-            return text
-        except Exception as exc:  # noqa: BLE001 - try the next pool key
-            key_pool_engine.mark_failure(key.id, exc)
-            last_exc = exc
-            logger.warning(
-                "vision_master: chat key %s (%s/%s) failed: %s; next key",
-                key.id,
-                key.provider,
-                key.model,
-                exc,
-            )
-
-    raise last_exc or RuntimeError("All AI keys failed")
-
+    """Fast chat completion for the Ask CampusMart AI assistant."""
+    return key_pool_engine.ai_complete(
+        prompt=user_message,
+        system_instruction=system,
+        images=[image_url] if image_url else None,
+        db=db,
+        task_type="chat",
+        temperature=temperature,
+    )
 
 def probe_key(
     config: dict[str, str],

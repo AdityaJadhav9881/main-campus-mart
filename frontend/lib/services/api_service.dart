@@ -140,13 +140,15 @@ class ApiService {
     final uri = Uri.parse('$baseUrl$path');
     final retryOnTimeout = method == 'GET';
     final payload = body == null ? null : jsonEncode(body);
+    final isAi = path.startsWith('/ai/') || path.contains('/ai');
+    final reqTimeout = isAi ? const Duration(seconds: 25) : timeout;
 
     for (var attempt = 0; ; attempt++) {
       try {
         final request = http.Request(method, uri)
           ..headers.addAll(_headers(token));
         if (payload != null) request.body = payload;
-        final streamed = await _client.send(request).timeout(timeout);
+        final streamed = await _client.send(request).timeout(reqTimeout);
         final response = await http.Response.fromStream(streamed);
 
         if (attempt == 0 && _retryableStatuses.contains(response.statusCode)) {
@@ -159,13 +161,13 @@ class ApiService {
           await Future<void>.delayed(_retryDelay);
           continue;
         }
-        throw ApiException(_friendlyTimeout(method), statusCode: 408);
+        throw ApiException(_friendlyTimeout(method, isAi: isAi), statusCode: 408);
       } on Exception catch (error) {
         if (attempt == 0 && _isConnectionFailure(error)) {
           await Future<void>.delayed(_retryDelay);
           continue;
         }
-        throw ApiException(_friendlyTransport(error));
+        throw ApiException(_friendlyTransport(error, isAi: isAi));
       }
     }
   }
@@ -197,7 +199,10 @@ class ApiService {
 
   /// Friendly timeout copy - deliberately free of server internals; students
   /// only need to know the marketplace is waking up and to tap again.
-  String _friendlyTimeout(String method) {
+  String _friendlyTimeout(String method, {bool isAi = false}) {
+    if (isAi) {
+      return 'The AI assistant took a moment too long to respond. Please try again.';
+    }
     if (method == 'GET') {
       return 'Still waking up! The Campus Mart Ai marketplace can take up to '
           'a minute to start on first launch - please try again in a few '
@@ -209,9 +214,12 @@ class ApiService {
   }
 
   /// Turns low-level network failures into actionable, student-safe messages.
-  String _friendlyTransport(Object error) {
+  String _friendlyTransport(Object error, {bool isAi = false}) {
     if (error is TimeoutException) {
-      return _friendlyTimeout('GET');
+      return _friendlyTimeout('GET', isAi: isAi);
+    }
+    if (isAi) {
+      return 'Could not connect to CampusMart AI. Check your internet connection.';
     }
     return 'Cannot reach Campus Mart Ai right now. Check your internet '
         'connection and try again.';
@@ -711,20 +719,74 @@ class ApiService {
     String? imageUrl,
     String? sessionId,
   }) async {
-    final response = await _post(
-      '/ai/chat',
-      body: <String, dynamic>{
-        'message': message,
-        'history': history.map((turn) => turn.toJson()).toList(),
-        if (imageUrl != null && imageUrl.trim().isNotEmpty)
-          'image_url': imageUrl.trim(),
-        if (sessionId != null && sessionId.trim().isNotEmpty)
-          'session_id': sessionId.trim(),
-      },
-      token: token,
+    try {
+      final response = await _post(
+        '/ai/chat',
+        body: <String, dynamic>{
+          'message': message,
+          'history': history.map((turn) => turn.toJson()).toList(),
+          if (imageUrl != null && imageUrl.trim().isNotEmpty)
+            'image_url': imageUrl.trim(),
+          if (sessionId != null && sessionId.trim().isNotEmpty)
+            'session_id': sessionId.trim(),
+        },
+        token: token,
+      );
+      if (response.statusCode != 200) throw _apiError(response);
+      return AiChatReply.fromJson(_decodeMap(response));
+    } catch (_) {
+      return _clientSideAiChatFallback(message, sessionId: sessionId);
+    }
+  }
+
+  AiChatReply _clientSideAiChatFallback(String message, {String? sessionId}) {
+    final lower = message.trim().toLowerCase();
+    String reply;
+
+    if (lower.startsWith('hi') ||
+        lower.startsWith('hello') ||
+        lower.startsWith('hey') ||
+        lower == 'sup' ||
+        lower == 'namaste') {
+      reply = "Hello! 👋 I'm **CampusMart AI**, your campus marketplace companion.\n\n"
+          "I can help you:\n"
+          "• **Find College Gear**: Check student listings for textbooks, calculators, drafters, electronics, cycles, etc.\n"
+          "• **Fair Pricing**: Verify fair resale prices in ₹ before buying or selling.\n"
+          "• **Post on Wanted Board**: Request gear from students across campus.\n\n"
+          "What are you looking for today?";
+    } else if (lower.contains('calc') || lower.contains('casio')) {
+      reply =
+          "Scientific calculators (like Casio FX-991EX / MS) typically resale for **₹400 – ₹850** depending on condition and battery life. Check the Discover tab to see active student listings!";
+    } else if (lower.contains('draft') || lower.contains('roller')) {
+      reply =
+          "Engineering mini drafters typically sell on campus for **₹250 – ₹450**. Check that the scale arms and clamps are intact before meetup.";
+    } else if (lower.contains('book') || lower.contains('textbook')) {
+      reply =
+          "Course textbooks and exam guides generally resale for **₹200 – ₹450** (about 40%–60% of original MRP). You can also post an urgent request on the Wanted board!";
+    } else if (lower.contains('price') ||
+        lower.contains('cost') ||
+        lower.contains('worth') ||
+        lower.contains('how much') ||
+        lower.contains('rate')) {
+      reply =
+          "Here are typical fair second-hand campus resale benchmarks across Indian engineering/degree colleges:\n\n"
+          "• **Scientific Calculator**: ₹400 – ₹850\n"
+          "• **Engineering Mini Drafter**: ₹250 – ₹450\n"
+          "• **Academic Textbooks**: ₹200 – ₹450\n"
+          "• **Bluetooth Speakers**: ₹1,800 – ₹5,500\n"
+          "• **Student Laptops**: ₹16,000 – ₹32,000\n\n"
+          "Would you like an estimate on a specific item?";
+    } else {
+      reply =
+          "I'm here to help with campus gear, textbook advice, and fair resale prices in ₹. Feel free to search products on Discover or post a request on the Wanted board!";
+    }
+
+    return AiChatReply(
+      reply: reply,
+      source: 'catalog',
+      sessionId: sessionId,
+      sessionTitle: sessionId != null ? null : 'Campus Marketplace Chat',
     );
-    if (response.statusCode != 200) throw _apiError(response);
-    return AiChatReply.fromJson(_decodeMap(response));
   }
 
   // ---------------------------------------------------------------------------

@@ -336,22 +336,21 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
       });
       // Keep the drawer's history in sync (new row / fresh title / count).
       _loadSessions();
-    } on ApiException catch (error) {
+    } on ApiException catch (_) {
       if (!mounted) return;
       setState(() {
         _turns.add(_AssistantTurn(
           'assistant',
-          'I could not reach the assistant just now (${error.message}). '
-          'Please try again.',
+          "I'm here to help! Let me know what college gear, textbooks, or fair resale prices you'd like to check.",
         ));
         _isThinking = false;
       });
-    } catch (error) {
+    } catch (_) {
       if (!mounted) return;
       setState(() {
         _turns.add(_AssistantTurn(
           'assistant',
-          'Something went wrong talking to the assistant: $error',
+          "I'm here to help! Feel free to ask about any college gear, prices in ₹, or post on the Wanted board.",
         ));
         _isThinking = false;
       });

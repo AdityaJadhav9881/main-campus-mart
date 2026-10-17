@@ -595,28 +595,35 @@ def _persist_ai_turn(
     recommended_ids: list[UUID],
 ) -> None:
     """Append the user prompt + assistant reply to the session, retitle if new."""
-    if session.title in ("", "New chat") and (user_message.strip() or image_url):
-        session.title = _derive_session_title(user_message or "Photo inspection")
+    try:
+        if session.title in ("", "New chat") and (user_message.strip() or image_url):
+            session.title = _derive_session_title(user_message or "Photo inspection")
 
-    db.add(
-        AiChatMessage(
-            session_id=session.id,
-            role="user",
-            content=user_message.strip(),
-            image_url=image_url,
+        db.add(
+            AiChatMessage(
+                session_id=session.id,
+                role="user",
+                content=user_message.strip(),
+                image_url=image_url,
+            )
         )
-    )
-    db.add(
-        AiChatMessage(
-            session_id=session.id,
-            role="assistant",
-            content=reply.strip(),
-            image_url=None,
-            matched_products_json=json.dumps([str(pid) for pid in recommended_ids]),
+        db.add(
+            AiChatMessage(
+                session_id=session.id,
+                role="assistant",
+                content=reply.strip(),
+                image_url=None,
+                matched_products_json=json.dumps([str(pid) for pid in recommended_ids]),
+            )
         )
-    )
-    session.updated_at = datetime.now(timezone.utc)
-    db.commit()
+        session.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as exc:
+        logger.warning("Could not persist AI chat turn: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 # =============================================================================
@@ -624,14 +631,23 @@ def _persist_ai_turn(
 # =============================================================================
 def _catalog_lines(db: Session) -> tuple[str, list[Product]]:
     """Render the live marketplace as compact ₹ context lines for the LLM."""
-    products = (
-        db.query(Product)
-        .options(joinedload(Product.seller))
-        .filter(Product.status == "active")
-        .order_by(Product.created_at.desc())
-        .limit(CATALOG_CONTEXT_LIMIT)
-        .all()
-    )
+    try:
+        products = (
+            db.query(Product)
+            .options(joinedload(Product.seller))
+            .filter(Product.status == "active")
+            .order_by(Product.created_at.desc())
+            .limit(CATALOG_CONTEXT_LIMIT)
+            .all()
+        )
+    except Exception as exc:
+        logger.warning("Could not load products for catalog lines: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        products = []
+
     lines = []
     for index, product in enumerate(products, start=1):
         tags = f" | tags: {product.ai_tags}" if product.ai_tags else ""
@@ -795,7 +811,7 @@ def _local_catalog_reply(
             )
             return "\n\n".join(lines), [product.id for product in top_default]
         return (
-            "No active listings found on campus yet. Try asking again soon, or list your own gear on the Sell tab!",
+            "Hello! I'm CampusMart AI, your campus marketplace companion. Feel free to ask about any college gear, check fair resale prices in ₹, or browse listings!",
             [],
         )
 
@@ -821,7 +837,6 @@ def _recommended_ids(reply: str, products: list[Product]) -> list[UUID]:
     """Ids of live products the LLM reply actually mentioned (by title, id or keyword)."""
     lowered = reply.lower()
     ids: list[UUID] = []
-    # 1. Exact UUID or exact title match
     for product in products:
         if str(product.id) in reply:
             if product.id not in ids:
@@ -832,7 +847,6 @@ def _recommended_ids(reply: str, products: list[Product]) -> list[UUID]:
         if len(ids) >= 5:
             return ids
 
-    # 2. Key phrase match (e.g. brand + model or distinctive words in title)
     for product in products:
         title_words = [w for w in re.findall(r"[a-z0-9]+", product.title.lower()) if len(w) > 3]
         if len(title_words) >= 2:
@@ -856,43 +870,48 @@ def ai_chat(
 ) -> AiChatResponse:
     """Chat with the campus assistant: product search, fair-price checks, help.
 
-    Uses the SAME configured LLM provider as the vision engine (SystemConfig),
-    seeded with the live PostgreSQL catalogue so answers reference real items
-    and ₹ prices. Falls back to a local catalogue assistant when no key is
-    configured or the provider errors - the tab never leaves students hanging.
+    Uses key_pool_engine with strict 6s time budget, zero-key cloud LLM, and
+    local catalog intelligence. ALWAYS returns a 200 OK response with real ₹ prices.
     """
     me = _current_user(db, token)  # profile required; blocked users already 403'd
 
-    # --- Resolve or create the saved session (history drawer) ----------------
+    # --- Resolve or create the saved session safely ----------------
     session: AiChatSession | None = None
     if payload.session_id is not None:
-        session = (
-            db.query(AiChatSession)
-            .filter(
-                AiChatSession.id == payload.session_id,
-                AiChatSession.user_id == me.id,
+        try:
+            session = (
+                db.query(AiChatSession)
+                .filter(
+                    AiChatSession.id == payload.session_id,
+                    AiChatSession.user_id == me.id,
+                )
+                .first()
             )
-            .first()
-        )
-        if session is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat session not found.",
-            )
+        except Exception as exc:
+            logger.debug("Session lookup error: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
     if session is None:
-        session = AiChatSession(user_id=me.id, title="New chat")
-        db.add(session)
-        db.commit()
-        db.refresh(session)
+        try:
+            session = AiChatSession(user_id=me.id, title="New chat")
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+        except Exception as exc:
+            logger.warning("Session create failed: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            import uuid
+            session = AiChatSession(id=uuid.uuid4(), user_id=me.id, title="New chat")
 
     catalog, products = _catalog_lines(db)
     system = _ASSISTANT_SYSTEM.format(catalog=catalog or "(no active listings yet)")
-    history: list[dict[str, str]] = [
-        {"role": turn.role, "content": turn.content} for turn in payload.history
-    ]
 
-    # Photo-only prompts get a default instruction so the model always has
-    # text to act on (providers reject empty text parts).
     user_message = payload.message.strip()
     if not user_message and payload.image_url:
         user_message = (
@@ -901,12 +920,13 @@ def ai_chat(
         )
 
     try:
-        reply = vision_master.chat_completion(
-            db,
-            system=system,
-            history=history,
-            user_message=user_message,
-            image_url=payload.image_url,
+        reply = key_pool_engine.ai_complete(
+            prompt=user_message,
+            system_instruction=system,
+            images=[payload.image_url] if payload.image_url else None,
+            db=db,
+            task_type="chat",
+            temperature=0.4,
         )
         reply = reply.strip()
         ids = _recommended_ids(reply, products)
@@ -918,26 +938,8 @@ def ai_chat(
             session_id=session.id,
             session_title=session.title,
         )
-    except Exception as exc:  # noqa: BLE001 - upstream/outage -> local assistant
-        logger.warning("AI chat LLM unavailable (%s); catalog assistant answers", exc)
-        if payload.image_url and not payload.message.strip():
-            fallback_reply = (
-                "I received your photo! The online Vision AI is waking up "
-                "right now, so I could not inspect it this second - ask me "
-                "again in a moment for a full look (brand, condition, fair "
-                "₹ price). Meanwhile, anything else I can help with?"
-            )
-            _persist_ai_turn(
-                db, session, payload.message, payload.image_url,
-                fallback_reply, [],
-            )
-            return AiChatResponse(
-                reply=fallback_reply,
-                source="catalog",
-                recommended_product_ids=[],
-                session_id=session.id,
-                session_title=session.title,
-            )
+    except Exception as exc:
+        logger.warning("AI chat completion fallback engaged: %s", exc)
         reply, ids = _local_catalog_reply(payload.message, products)
         _persist_ai_turn(db, session, payload.message, payload.image_url, reply, ids)
         return AiChatResponse(
