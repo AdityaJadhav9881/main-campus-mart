@@ -4,6 +4,8 @@ import '../models/product.dart';
 import '../services/api_service.dart';
 import 'auth_provider.dart';
 
+import '../services/local_cache_service.dart';
+
 /// Feed state for the discovery grid: loading flag, error message, and the
 /// list of active products.
 ///
@@ -11,7 +13,9 @@ import 'auth_provider.dart';
 /// holds a reference to the current [AuthProvider] (for the bearer token used
 /// by [addProduct]).
 class ProductProvider extends ChangeNotifier {
-  ProductProvider(this._auth);
+  ProductProvider(this._auth) {
+    _loadFromCache();
+  }
 
   AuthProvider _auth;
   final ApiService _api = ApiService.instance;
@@ -24,10 +28,22 @@ class ProductProvider extends ChangeNotifier {
   String _lastQuery = '';
   String _lastCategory = '';
   String _lastCollege = '';
+  String _lastBranch = '';
+  String _lastYear = '';
 
   List<Product> get products => _products;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+
+  Future<void> _loadFromCache() async {
+    try {
+      final cached = await LocalCacheService.getCachedFeedProducts();
+      if (cached != null && cached.isNotEmpty && _products.isEmpty) {
+        _products = cached.map((map) => Product.fromJson(map)).toList();
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
 
   /// Re-binds the auth source whenever the AuthProvider instance changes
   /// (called by ChangeNotifierProxyProvider.update).
@@ -36,31 +52,35 @@ class ProductProvider extends ChangeNotifier {
   }
 
   /// GET /products/ - first load and pull-to-refresh.
-  ///
-  /// Optional server-side filters (Discover search bar + category chips):
-  /// [query] maps to `?q=` (title/description/category/tag match),
-  /// [category] to `?category=` and [college] to `?college=` (the
-  /// "🎓 My College" campus-network toggle). Omit a parameter to reuse the
-  /// previous value; pass an empty string to clear it. Existing items stay
-  /// visible during a refresh; the full-screen loader only appears when
-  /// there is nothing to show yet.
   Future<void> loadProducts({
     String? query,
     String? category,
     String? college,
+    String? branch,
+    String? academicYear,
   }) async {
     if (query != null) _lastQuery = query.trim();
     if (category != null) _lastCategory = category.trim();
     if (college != null) _lastCollege = college.trim();
-    _isLoading = true;
+    if (branch != null) _lastBranch = branch.trim();
+    if (academicYear != null) _lastYear = academicYear.trim();
+
+    // If we have no cached items, show spinner. If cached items exist, load silently in background.
+    if (_products.isEmpty) {
+      _isLoading = true;
+    }
     _errorMessage = null;
     notifyListeners();
     try {
-      _products = await _api.fetchActiveProducts(
+      final fetched = await _api.fetchActiveProducts(
         query: _lastQuery.isEmpty ? null : _lastQuery,
         category: _lastCategory.isEmpty ? null : _lastCategory,
         college: _lastCollege.isEmpty ? null : _lastCollege,
+        branch: _lastBranch.isEmpty ? null : _lastBranch,
+        academicYear: _lastYear.isEmpty ? null : _lastYear,
       );
+      _products = fetched;
+      LocalCacheService.cacheFeedProducts(fetched.map((p) => p.toJson()).toList());
     } on ApiException catch (error) {
       _errorMessage = error.message;
     } catch (error) {

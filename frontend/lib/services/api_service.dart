@@ -7,12 +7,14 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' show MediaType;
 
 import '../models/ai_analysis.dart';
+import '../models/call_session.dart';
 import '../models/cart_models.dart';
 import '../models/chat_models.dart';
 import '../models/college.dart';
 import '../models/notification_item.dart';
 import '../models/product.dart';
 import '../models/user_profile.dart';
+import '../models/wanted_request.dart';
 
 /// Typed wrapper for every non-2xx API response or transport-level failure.
 /// Providers catch this to surface clean messages instead of raw exceptions.
@@ -259,6 +261,8 @@ class ApiService {
     String? query,
     String? category,
     String? college,
+    String? branch,
+    String? academicYear,
   }) async {
     final params = <String, String>{};
     final trimmedQuery = query?.trim() ?? '';
@@ -269,6 +273,14 @@ class ApiService {
     }
     final trimmedCollege = college?.trim() ?? '';
     if (trimmedCollege.isNotEmpty) params['college'] = trimmedCollege;
+    final trimmedBranch = branch?.trim() ?? '';
+    if (trimmedBranch.isNotEmpty && trimmedBranch != 'All Branches') {
+      params['branch'] = trimmedBranch;
+    }
+    final trimmedYear = academicYear?.trim() ?? '';
+    if (trimmedYear.isNotEmpty && trimmedYear != 'All Years') {
+      params['academic_year'] = trimmedYear;
+    }
     final path = params.isEmpty
         ? '/products/'
         : '/products/?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
@@ -947,6 +959,194 @@ class ApiService {
     );
     if (response.statusCode != 201) throw _apiError(response);
     return ChatMessage.fromJson(_decodeMap(response));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Calls & Signaling
+  // ---------------------------------------------------------------------------
+  Future<CallSession> initiateCall({
+    required String receiverId,
+    String? productId,
+    String callType = 'voice',
+    String? sdpOffer,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/calls/initiate',
+      body: <String, dynamic>{
+        'receiver_id': receiverId,
+        if (productId != null) 'product_id': productId,
+        'call_type': callType,
+        if (sdpOffer != null) 'sdp_offer': sdpOffer,
+      },
+      token: token,
+    );
+    if (response.statusCode != 201 && response.statusCode != 200) {
+      throw _apiError(response);
+    }
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  Future<CallSession?> fetchIncomingCall({required String token}) async {
+    final response = await _get('/calls/incoming', token: token);
+    if (response.statusCode == 200) {
+      final text = response.body.trim();
+      if (text.isEmpty || text == 'null') return null;
+      return CallSession.fromJson(_decodeMap(response));
+    }
+    return null;
+  }
+
+  Future<CallSession> fetchCallSession(String callId, {required String token}) async {
+    final response = await _get('/calls/$callId', token: token);
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  Future<CallSession> answerCall(
+    String callId, {
+    String? sdpAnswer,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/calls/$callId/answer',
+      body: <String, dynamic>{
+        if (sdpAnswer != null) 'sdp_answer': sdpAnswer,
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  Future<CallSession> declineCall(String callId, {required String token}) async {
+    final response = await _post(
+      '/calls/$callId/decline',
+      body: <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  Future<CallSession> endCall(String callId, {required String token}) async {
+    final response = await _post(
+      '/calls/$callId/end',
+      body: <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  Future<CallSession> signalCall(
+    String callId, {
+    String? sdpAnswer,
+    String? audioChunkBase64,
+    required String token,
+  }) async {
+    final response = await _post(
+      '/calls/$callId/signal',
+      body: <String, dynamic>{
+        if (sdpAnswer != null) 'sdp_answer': sdpAnswer,
+        if (audioChunkBase64 != null) 'audio_chunk_base64': audioChunkBase64,
+      },
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return CallSession.fromJson(_decodeMap(response));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Want to Buy (WTB) Campus Request Board
+  // ---------------------------------------------------------------------------
+  Future<List<WantedRequest>> fetchWantedRequests({
+    String? collegeName,
+    String? category,
+    String? branch,
+    String? academicYear,
+  }) async {
+    final params = <String, String>{};
+    if (collegeName != null && collegeName.trim().isNotEmpty) {
+      params['college_name'] = collegeName.trim();
+    }
+    if (category != null && category.trim().isNotEmpty && category != 'All') {
+      params['category'] = category.trim();
+    }
+    if (branch != null && branch.trim().isNotEmpty && branch != 'All Branches') {
+      params['branch'] = branch.trim();
+    }
+    if (academicYear != null && academicYear.trim().isNotEmpty && academicYear != 'All Years') {
+      params['academic_year'] = academicYear.trim();
+    }
+    final path = params.isEmpty
+        ? '/wanted/'
+        : '/wanted/?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
+    final response = await _get(path);
+    if (response.statusCode != 200) throw _apiError(response);
+    final items = _decodeList(response);
+    return items
+        .map((dynamic item) =>
+            WantedRequest.fromJson(item! as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<WantedRequest> createWantedRequest(
+    Map<String, dynamic> data, {
+    required String token,
+  }) async {
+    final response = await _post(
+      '/wanted/',
+      body: data,
+      token: token,
+    );
+    if (response.statusCode != 201 && response.statusCode != 200) {
+      throw _apiError(response);
+    }
+    return WantedRequest.fromJson(_decodeMap(response));
+  }
+
+  Future<Map<String, dynamic>> draftWantedWithAi(
+    String prompt, {
+    required String token,
+  }) async {
+    final response = await _post(
+      '/wanted/ai-draft',
+      body: <String, dynamic>{'prompt': prompt},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
+  }
+
+  Future<WantedRequest> fulfillWantedRequest(
+    String id,
+    String productId, {
+    required String token,
+  }) async {
+    final response = await _post(
+      '/wanted/$id/fulfill?product_id=$productId',
+      body: <String, dynamic>{},
+      token: token,
+    );
+    if (response.statusCode != 200) throw _apiError(response);
+    return WantedRequest.fromJson(_decodeMap(response));
+  }
+
+  Future<void> deleteWantedRequest(String id, {required String token}) async {
+    final response = await _delete('/wanted/$id', token: token);
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      throw _apiError(response);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Viral WhatsApp Share Card
+  // ---------------------------------------------------------------------------
+  Future<Map<String, dynamic>> fetchProductShareCard(String productId) async {
+    final response = await _get('/products/$productId/share-card');
+    if (response.statusCode != 200) throw _apiError(response);
+    return _decodeMap(response);
   }
 }
 

@@ -86,6 +86,11 @@ class User(Base):
     name = Column(String(120), nullable=False)
     email = Column(String(255), unique=True, nullable=False)
 
+    # Contact number the Master Admin can set/correct from the dashboard
+    # (also echoed on order cards so buyers and sellers can coordinate).
+    # NULL for accounts that never provided one.
+    phone = Column(String(20), nullable=True)
+
     # --- Maharashtra CET Cell college identity (college network) -------------
     # Free-text official college name + its 4-digit DTE/CET institute code
     # (e.g. "COEP Technological University" / "6006"). NULL for accounts that
@@ -93,6 +98,20 @@ class User(Base):
     # change it in Profile.
     college_name = Column(String(255), nullable=True)
     college_code = Column(String(16), nullable=True)
+
+    # Academic classification (branch / department & current engineering year)
+    branch = Column(
+        String(80),
+        nullable=False,
+        default="All Branches",
+        server_default="'All Branches'",
+    )
+    academic_year = Column(
+        String(50),
+        nullable=False,
+        default="All Years",
+        server_default="'All Years'",
+    )
 
     # --- Live-production auth (Phase 7) --------------------------------------
     # 'active'  -> normal marketplace access
@@ -181,6 +200,22 @@ class Product(Base):
     # Free-text category label (e.g. 'textbooks', 'electronics', 'furniture').
     # Indexed because category browsing is a primary marketplace filter.
     category = Column(String(80), nullable=False, index=True)
+
+    # Academic branch/department & year classification
+    branch = Column(
+        String(80),
+        nullable=False,
+        default="All Branches",
+        server_default="'All Branches'",
+        index=True,
+    )
+    academic_year = Column(
+        String(50),
+        nullable=False,
+        default="All Years",
+        server_default="'All Years'",
+        index=True,
+    )
 
     # Free-text condition label, e.g. 'new' | 'like_new' | 'good' | 'fair' | 'poor'.
     condition = Column(String(50), nullable=False)
@@ -780,3 +815,115 @@ class CollegeDirectory(Base):
         default=_utcnow,
         server_default="now()",
     )
+
+
+class WantedRequest(Base):
+    """A 'Want to Buy' (WTB) request posted by a student on campus.
+
+    Other students at the same college (or branch) can see this, match it with
+    what they have, and message the requester directly.
+    """
+
+    __tablename__ = "wanted_requests"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    requester_name = Column(String(120), nullable=False)
+    requester_email = Column(String(255), nullable=False)
+    college_name = Column(String(255), nullable=False, index=True)
+    college_code = Column(String(16), nullable=True)
+
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False)
+    max_budget = Column(Float, nullable=False)
+    category = Column(String(80), nullable=False, default="Academic Material")
+    branch = Column(String(80), nullable=False, default="All Branches")
+    academic_year = Column(String(50), nullable=False, default="All Years")
+    urgency = Column(String(40), nullable=False, default="Flexible")  # 'Urgent (24–48h)' | 'This Week' | 'Flexible'
+    status = Column(String(20), nullable=False, default="open", server_default="'open'")  # 'open' | 'fulfilled' | 'closed'
+    ai_keywords = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+
+    requester = relationship("User", lazy="joined")
+
+
+class CallSession(Base):
+    """P2P Audio/Video call session between two students.
+
+    Tracks ringing state, caller/receiver signaling, duration, and completion.
+    """
+
+    __tablename__ = "call_sessions"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+
+    caller_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    caller_name = Column(String(120), nullable=False)
+
+    receiver_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    receiver_name = Column(String(120), nullable=False)
+
+    product_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    call_type = Column(String(20), nullable=False, default="voice")  # 'voice' | 'video'
+    status = Column(
+        String(20),
+        nullable=False,
+        default="ringing",
+        server_default="'ringing'",
+    )  # 'ringing' | 'connected' | 'declined' | 'ended' | 'missed'
+
+    sdp_offer = Column(Text, nullable=True)
+    sdp_answer = Column(Text, nullable=True)
+    audio_chunks_json = Column(Text, nullable=True)
+
+    started_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default="now()",
+    )
+    connected_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+    caller = relationship("User", foreign_keys=[caller_id], lazy="joined")
+    receiver = relationship("User", foreign_keys=[receiver_id], lazy="joined")
+    product = relationship("Product", lazy="joined")
+

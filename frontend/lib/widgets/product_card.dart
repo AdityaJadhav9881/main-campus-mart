@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/product.dart';
 import '../providers/wishlist_provider.dart';
@@ -131,6 +132,29 @@ class ProductCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 6),
                       _TrustPill(score: product.sellerTrustScore),
+                      const SizedBox(width: 6),
+                      InkWell(
+                        onTap: () async {
+                          final text = product.whatsappShareText ??
+                              '🔥 *${product.title}* listed on CampusMart for *${formatInr(product.listedPrice)}*!\n'
+                              'Check it on CampusMart: https://campusmart-api-zia4.onrender.com/products/${product.id}';
+                          final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
+                          try {
+                            if (await canLaunchUrl(url)) {
+                              await launchUrl(url, mode: LaunchMode.externalApplication);
+                            }
+                          } catch (_) {}
+                        },
+                        borderRadius: BorderRadius.circular(8),
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF25D366).withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.share_rounded, size: 14, color: Color(0xFF15803D)),
+                        ),
+                      ),
                     ],
                   ),
                   if (suggested != null && suggested > 0) ...[

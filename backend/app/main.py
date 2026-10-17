@@ -27,6 +27,7 @@ from .models import User
 from .routers import (
     admin,
     auth_routes,
+    calls,
     cart,
     chat,
     colleges,
@@ -34,6 +35,7 @@ from .routers import (
     products,
     transactions,
     users,
+    wanted,
 )
 from .schema_upgrade import upgrade_schema
 from .storage import UPLOAD_DIR
@@ -164,6 +166,8 @@ app.include_router(colleges.router)     # /colleges CET Cell directory (college
                                         # network + My College filter)
 app.include_router(notifications.router)  # /notifications/* bell-icon feed
 app.include_router(cart.router)         # /cart/* staging area before checkout
+app.include_router(calls.router)        # /calls/* two-phone signaling & audio relay
+app.include_router(wanted.router)       # /wanted/* campus request board & AI matching
 
 
 @app.get("/", tags=["health"])

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/product.dart';
 import '../providers/auth_provider.dart';
@@ -143,6 +144,18 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       );
   }
 
+  void _openWhatsAppShare() async {
+    final text = widget.product.whatsappShareText ??
+        '🔥 *${widget.product.title}* listed on CampusMart for *${formatInr(widget.product.listedPrice)}*!\n'
+        'Check it out on CampusMart AI: https://campusmart-api-zia4.onrender.com/products/${widget.product.id}';
+    final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final wishlist = context.watch<WishlistProvider>();
@@ -162,6 +175,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         onBuy: _purchase,
         onChat: _openChatWithSeller,
         onCartTap: _handleCartTap,
+        onShare: _openWhatsAppShare,
       ),
       body: CustomScrollView(
         slivers: [
@@ -1039,6 +1053,7 @@ class _BottomBuyBar extends StatelessWidget {
     required this.onBuy,
     required this.onCartTap,
     this.onChat,
+    this.onShare,
   });
 
   final Product product;
@@ -1050,13 +1065,14 @@ class _BottomBuyBar extends StatelessWidget {
   final VoidCallback onBuy;
   final VoidCallback onCartTap;
   final VoidCallback? onChat;
+  final VoidCallback? onShare;
 
   String get _label {
     if (isPurchasing) return 'Processing...';
     if (status == 'sold') return 'Sold';
     if (status == 'flagged') return 'Under Review';
     if (isOwnListing) return 'Your Listing';
-    return 'Buy / Reserve Now';
+    return 'Buy Now';
   }
 
   @override
@@ -1065,100 +1081,127 @@ class _BottomBuyBar extends StatelessWidget {
     final sold = status == 'sold';
     final showChat = !isOwnListing && status == 'active' && onChat != null;
 
+    final hasDiscount = product.suggestedPrice != null &&
+        product.suggestedPrice! > product.listedPrice;
+    final discountPercent = hasDiscount
+        ? (((product.suggestedPrice! - product.listedPrice) /
+                    product.suggestedPrice!) *
+                100)
+            .round()
+        : 0;
+
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottom),
+      padding: EdgeInsets.fromLTRB(16, 10, 16, 10 + bottom),
       decoration: const BoxDecoration(
         color: AppColors.surface,
         border: Border(top: BorderSide(color: AppColors.hairline)),
       ),
       child: Row(
         children: [
-          Expanded(
-            flex: 4,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'YOUR PRICE',
-                  style: TextStyle(
-                    color: AppColors.textMuted,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.0,
-                  ),
+          // 1. Price stack
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                formatInr(product.listedPrice),
+                maxLines: 1,
+                style: TextStyle(
+                  color: sold ? AppColors.textMuted : AppColors.inkBlack,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
                 ),
-                const SizedBox(height: 2),
+              ),
+              if (hasDiscount && discountPercent > 0)
                 Text(
-                  formatInr(product.listedPrice),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: sold ? AppColors.textMuted : AppColors.inkBlack,
-                    fontSize: 18.5,
+                  '$discountPercent% BELOW AI',
+                  style: const TextStyle(
+                    color: Color(0xFF15803D),
+                    fontSize: 9.5,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
-              ],
-            ),
+            ],
           ),
+          const SizedBox(width: 10),
+
+          // 2. Add to Cart Icon button
           if (status == 'active' && !isOwnListing) ...[
-            const SizedBox(width: 8),
             _CartActionButton(inCart: inCart, onTap: onCartTap),
+            const SizedBox(width: 6),
           ],
-          if (showChat) ...[
-            const SizedBox(width: 8),
-            Expanded(
-              flex: 5,
-              child: OutlinedButton.icon(
-                onPressed: onChat,
-                icon: const Icon(Icons.chat_bubble_outline, size: 15),
-                label: const Text(
-                  'Chat with Seller',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+
+          // 3. WhatsApp Share Icon button
+          if (onShare != null) ...[
+            Tooltip(
+              message: 'Share to WhatsApp',
+              child: Material(
+                color: const Color(0xFF25D366).withOpacity(0.12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Color(0xFF25D366), width: 1),
                 ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.royalBlue,
-                  side: BorderSide(
-                    color: AppColors.royalBlue.withOpacity(0.55),
-                    width: 1.2,
-                  ),
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minimumSize: const Size(0, 46),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  textStyle: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: onShare,
+                  child: const SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Icon(Icons.share_rounded, size: 20, color: Color(0xFF15803D)),
                   ),
                 ),
               ),
             ),
+            const SizedBox(width: 6),
           ],
-          const SizedBox(width: 8),
-          Expanded(
-            flex: 6,
-            child: FilledButton(
-              onPressed: canBuy ? onBuy : null,
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.inkBlack,
-                foregroundColor: Colors.white,
+
+          // 4. Outlined Chat button
+          if (showChat) ...[
+            OutlinedButton.icon(
+              onPressed: onChat,
+              icon: const Icon(Icons.chat_bubble_outline, size: 15),
+              label: const Text('Chat'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.royalBlue,
+                side: BorderSide(
+                  color: AppColors.royalBlue.withOpacity(0.55),
+                  width: 1.2,
+                ),
                 padding: const EdgeInsets.symmetric(horizontal: 10),
-                minimumSize: const Size(0, 46),
+                minimumSize: const Size(64, 44),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
                 textStyle: const TextStyle(
                   fontWeight: FontWeight.w700,
-                  fontSize: 12.5,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+
+          // 5. Primary Buy Now Button
+          Expanded(
+            child: FilledButton(
+              onPressed: canBuy ? onBuy : null,
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.inkBlack,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(80, 44),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13.5,
                 ),
               ),
               child: isPurchasing
                   ? const SizedBox(
-                      width: 20,
-                      height: 20,
+                      width: 18,
+                      height: 18,
                       child: CircularProgressIndicator(
                         strokeWidth: 2.2,
                         color: Colors.white,

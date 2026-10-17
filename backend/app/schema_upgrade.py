@@ -18,6 +18,7 @@ Covered by this file:
                       products.ai_condition_notes, chat_messages.read_at
     College network : users.college_name/code, products.college_name/code,
                       email_otps.college_name/code
+    Admin override  : users.phone
     Order handover  : transactions.delivery_address/hostel_or_landmark/
                       contact_phone/payment_method/upi_reference/order_notes/
                       otp_code/order_status
@@ -41,12 +42,14 @@ from .models import (
     ActionOTP,
     AiChatMessage,
     AiChatSession,
+    CallSession,
     CartItem,
     ChatMessage,
     CollegeDirectory,
     EmailOTP,
     Notification,
     SystemConfig,
+    WantedRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,7 @@ logger = logging.getLogger(__name__)
 _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "status", "VARCHAR(16) DEFAULT 'active'"),
     ("users", "password_hash", "VARCHAR(128)"),
+    ("users", "phone", "VARCHAR(20)"),
     ("products", "trust_reason", "TEXT"),
     # --- Production multi-angle / AI-search upgrade -------------------------
     # JSON (not JSONB) so the same DDL is valid on every PostgreSQL version
@@ -73,6 +77,11 @@ _NEW_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("products", "college_code", "VARCHAR(16)"),
     ("email_otps", "college_name", "VARCHAR(255)"),
     ("email_otps", "college_code", "VARCHAR(16)"),
+    # --- Branch & Academic Year Classification --------------------------------
+    ("users", "branch", "VARCHAR(80) DEFAULT 'All Branches'"),
+    ("users", "academic_year", "VARCHAR(50) DEFAULT 'All Years'"),
+    ("products", "branch", "VARCHAR(80) DEFAULT 'All Branches'"),
+    ("products", "academic_year", "VARCHAR(50) DEFAULT 'All Years'"),
     # --- Structured checkout (order handover) ---------------------------------
     ("transactions", "delivery_address", "VARCHAR(400)"),
     ("transactions", "hostel_or_landmark", "VARCHAR(200)"),
@@ -96,6 +105,8 @@ _NEW_TABLES = (
     Notification.__table__,
     CartItem.__table__,
     CollegeDirectory.__table__,
+    WantedRequest.__table__,
+    CallSession.__table__,
 )
 
 

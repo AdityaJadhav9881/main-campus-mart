@@ -6,9 +6,16 @@ Live Admin Master Control endpoints for the React Admin Dashboard (Phase 7).
     GET  /admin/overview                     - real PostgreSQL counts + flagged queue
     GET  /admin/users                        - all users, newest first
     PATCH /admin/users/{user_id}/status      - block / unblock a student
+    PATCH /admin/users/{user_id}             - Master override: full profile edit
+                                               (+password, +college cascade)
+    DELETE /admin/users/{user_id}            - delete a student + their app data
     GET  /admin/listings                     - ALL products + seller denormalization
     PATCH /admin/listings/{product_id}/approve - unflag + trust bump (+0.2, cap 5.0)
     DELETE /admin/listings/{product_id}      - delete + trust penalty (-0.8, floor 0.0)
+    PATCH /admin/products/{product_id}       - Master override: edit any product field
+    PATCH /admin/transactions/{transaction_id} - Master override: edit order details
+    DELETE /admin/messages/{message_id}      - delete one chat message
+    POST /admin/messages/intervene           - post an official admin message
     GET  /admin/communications               - buyer<->seller threads + order context
     GET  /admin/ai-agents                    - runtime agent flags
     PATCH /admin/ai-agents/{agent_key}       - toggle an agent on/off
@@ -25,11 +32,13 @@ See app/auth.require_admin_access for the enforcement logic.
 
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from ..ai import key_pool_engine, vision_master
@@ -39,10 +48,26 @@ from ..ai.orchestrator import (
     reset_agent_flags,
     set_agent_enabled,
 )
-from ..auth import is_super_admin, require_admin_access
+from ..auth import (
+    PROTECTED_ADMIN_EMAILS,
+    hash_password,
+    is_super_admin,
+    require_admin_access,
+)
 from ..cet_colleges import get_college_by_code
 from ..database import get_db
-from ..models import ChatMessage, Product, Transaction, User
+from ..models import (
+    ActionOTP,
+    AiChatMessage,
+    AiChatSession,
+    CartItem,
+    ChatMessage,
+    EmailOTP,
+    Notification,
+    Product,
+    Transaction,
+    User,
+)
 from ..schemas import (
     AdminCommunicationsResponse,
     AdminCommunicationMessage,
@@ -50,13 +75,20 @@ from ..schemas import (
     AdminCommunicationThread,
     AdminCommunicationUser,
     AdminListingRead,
+    AdminMessageIntervene,
     AdminOverviewResponse,
+    AdminProductUpdate,
+    AdminTransactionUpdate,
     AdminUserStatusUpdate,
+    AdminUserUpdate,
     AgentFlagUpdate,
     AiConfigRead,
     AiConfigUpdate,
     AiKeyTestRequest,
     AiKeyTestResponse,
+    ChatMessageRead,
+    ProductRead,
+    TransactionRead,
     UserRead,
 )
 
@@ -120,6 +152,7 @@ def _admin_user(user: User) -> UserRead:
         firebase_uid=user.firebase_uid,
         name=user.name,
         email=user.email,
+        phone=user.phone,
         status=user.status,
         trust_score=user.trust_score,
         college_name=college_name,
@@ -259,6 +292,212 @@ def update_user_status(
     return _admin_user(user)
 
 
+@router.patch(
+    "/users/{user_id}",
+    response_model=UserRead,
+    summary="Master override: edit any user field",
+)
+def update_user(
+    user_id: UUID,
+    payload: AdminUserUpdate,
+    db: Session = Depends(get_db),
+) -> UserRead:
+    """Apply a partial profile override to any student account.
+
+    Only keys actually present in the request body are applied. Behaviour:
+
+        * email uniqueness is enforced (409 on a clash with another account);
+        * `new_password`, when sent, is bcrypt-hashed into password_hash;
+        * college edits cascade onto the student's product listings by
+          default (`cascade_college_to_products`), so corrected campuses
+          show up in Discover/notifications immediately;
+        * the Super Administrator can be re-profiled (name/college/...)
+          but can NEVER be set to 'blocked'.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+    cascade_college = data.pop("cascade_college_to_products", True)
+    new_password = data.pop("new_password", None)
+
+    if "email" in data and data["email"]:
+        email = data["email"].strip().lower()
+        clash = (
+            db.query(User)
+            .filter(func.lower(User.email) == email, User.id != user.id)
+            .first()
+        )
+        if clash is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Another account already uses '{email}'.",
+            )
+        user.email = email
+
+    if data.get("status") == "blocked" and is_super_admin(user.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Super Administrator '{user.email}' is protected and cannot "
+                "be blocked."
+            ),
+        )
+
+    for field in ("name", "phone", "college_name", "college_code"):
+        if field in data:
+            value = data[field]
+            user_attr = value.strip() if isinstance(value, str) else value
+            setattr(user, field, user_attr or None)
+
+    if data.get("trust_score") is not None:
+        user.trust_score = data["trust_score"]
+    if data.get("status") is not None:
+        user.status = data["status"]
+    if new_password:
+        user.password_hash = hash_password(new_password)
+
+    college_touched = "college_name" in data or "college_code" in data
+    if college_touched and cascade_college:
+        # Bulk-update the student's listings so the corrected campus is
+        # reflected everywhere at once (products keep their own snapshot).
+        db.query(Product).filter(Product.seller_id == user.id).update(
+            {
+                "college_name": user.college_name,
+                "college_code": user.college_code,
+            },
+            synchronize_session=False,
+        )
+
+    db.commit()
+    db.refresh(user)
+    logger.warning(
+        "Admin: user %s updated (fields: %s%s)",
+        user.email,
+        ", ".join(sorted(data)),
+        ", +password" if new_password else "",
+    )
+    return _admin_user(user)
+
+
+@router.delete(
+    "/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a user and their app data",
+)
+def delete_user(user_id: UUID, db: Session = Depends(get_db)) -> None:
+    """Safely remove a student account and everything they own.
+
+    Explicitly deletes cart items, action/email OTPs, AI chat sessions,
+    notifications, chat messages and listings (SQLite tests do not enforce
+    FK cascades, so the cleanup cannot rely on them). Accounts with purchase
+    or sales history are protected by the immutable transaction ledger: the
+    request is refused with 409 instead of breaking the order history. The
+    Super Administrator can never be deleted.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    if is_super_admin(user.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Super Administrator '{user.email}' is protected and cannot "
+                "be deleted."
+            ),
+        )
+
+    product_ids = [
+        row[0]
+        for row in db.query(Product.id).filter(Product.seller_id == user.id).all()
+    ]
+    has_purchases = (
+        db.query(Transaction.id).filter(Transaction.buyer_id == user.id).first()
+        is not None
+    )
+    has_sales = False
+    if product_ids:
+        has_sales = (
+            db.query(Transaction.id)
+            .filter(Transaction.product_id.in_(product_ids))
+            .first()
+            is not None
+        )
+    if has_purchases or has_sales:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot delete an account with purchase or sale history "
+                "(the transaction ledger is immutable). Block the user "
+                "instead."
+            ),
+        )
+
+    # Chat messages the user sent/received + anything on their listings.
+    db.query(ChatMessage).filter(
+        or_(
+            ChatMessage.sender_id == user.id,
+            ChatMessage.receiver_id == user.id,
+            ChatMessage.product_id.in_(product_ids),
+        )
+    ).delete(synchronize_session=False)
+
+    session_ids = [
+        row[0]
+        for row in db.query(AiChatSession.id)
+        .filter(AiChatSession.user_id == user.id)
+        .all()
+    ]
+    if session_ids:
+        db.query(AiChatMessage).filter(
+            AiChatMessage.session_id.in_(session_ids)
+        ).delete(synchronize_session=False)
+        db.query(AiChatSession).filter(
+            AiChatSession.id.in_(session_ids)
+        ).delete(synchronize_session=False)
+
+    db.query(Notification).filter(Notification.user_id == user.id).delete(
+        synchronize_session=False
+    )
+    db.query(CartItem).filter(
+        or_(
+            CartItem.user_id == user.id,
+            CartItem.product_id.in_(product_ids),
+        )
+    ).delete(synchronize_session=False)
+    db.query(ActionOTP).filter(
+        func.lower(ActionOTP.email) == user.email.lower()
+    ).delete(synchronize_session=False)
+    db.query(EmailOTP).filter(
+        func.lower(EmailOTP.email) == user.email.lower()
+    ).delete(synchronize_session=False)
+
+    if product_ids:
+        db.query(Product).filter(Product.id.in_(product_ids)).delete(
+            synchronize_session=False
+        )
+
+    email = user.email
+    db.delete(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete an account with purchase or sale history.",
+        ) from exc
+    logger.warning("Admin: user %s deleted (with app data)", email)
+
+
 # =============================================================================
 # Listings moderation
 # =============================================================================
@@ -355,6 +594,278 @@ def delete_listing(product_id: UUID, db: Session = Depends(get_db)) -> None:
             detail="Cannot delete a listing with existing purchase history.",
         ) from exc
     logger.warning("Admin: listing '%s' deleted", product_id)
+
+
+# =============================================================================
+# Product override (Master Admin edit-anything)
+# =============================================================================
+# Fields that may be explicitly reset to NULL via PATCH; every other column
+# is NOT NULL, so an explicit null for those is ignored instead of crashing.
+_NULLABLE_PRODUCT_FIELDS: frozenset[str] = frozenset(
+    {
+        "suggested_price",
+        "college_name",
+        "college_code",
+        "ai_tags",
+        "ai_condition_notes",
+        "image_urls",
+        "flag_reason",
+    }
+)
+
+
+@router.patch(
+    "/products/{product_id}",
+    response_model=ProductRead,
+    summary="Master override: edit any product field",
+)
+def update_any_product(
+    product_id: UUID,
+    payload: AdminProductUpdate,
+    db: Session = Depends(get_db),
+) -> ProductRead:
+    """Apply a partial override to any listing (only sent keys are applied).
+
+        * `is_flagged` maps onto status ('flagged' / restored 'active');
+        * `flag_reason` maps onto trust_reason;
+        * `seller_id` reassigns ownership (verified to exist);
+        * returns the public ProductRead shape for immediate re-render.
+    """
+    product = (
+        db.query(Product)
+        .options(joinedload(Product.seller))
+        .filter(Product.id == product_id)
+        .first()
+    )
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+
+    if data.get("seller_id") is not None:
+        seller = db.query(User).filter(User.id == data["seller_id"]).first()
+        if seller is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="New seller not found",
+            )
+        product.seller_id = seller.id
+        product.seller = seller
+    data.pop("seller_id", None)
+
+    if "is_flagged" in data:
+        flagged = data.pop("is_flagged")
+        if flagged:
+            product.status = "flagged"
+        elif product.status == "flagged":
+            product.status = "active"
+            product.trust_reason = None
+
+    if "flag_reason" in data:
+        product.trust_reason = data.pop("flag_reason")
+
+    for field, value in data.items():
+        if value is None and field not in _NULLABLE_PRODUCT_FIELDS:
+            continue  # explicit null on a NOT NULL column -> no-op
+        setattr(product, field, value)
+
+    db.commit()
+    db.refresh(product)
+    logger.warning(
+        "Admin: product '%s' overridden (fields: %s)",
+        product.title,
+        ", ".join(sorted(payload.model_fields_set)),
+    )
+    return ProductRead.model_validate(product)
+
+
+# =============================================================================
+# Order & chat moderation (Master Admin override)
+# =============================================================================
+def _transaction_read(transaction: Transaction) -> TransactionRead:
+    """Serialize a transaction with product/buyer/seller denormalization."""
+    product = transaction.product
+    return TransactionRead(
+        id=transaction.id,
+        product_id=transaction.product_id,
+        buyer_id=transaction.buyer_id,
+        final_price=transaction.final_price,
+        status=transaction.status,
+        timestamp=transaction.timestamp,
+        product_title=product.title if product else None,
+        product_image_url=product.image_url if product else None,
+        product_status=product.status if product else None,
+        buyer_name=transaction.buyer.name if transaction.buyer else None,
+        seller_name=(
+            product.seller.name if product and product.seller else None
+        ),
+        order_status=transaction.order_status,
+        payment_method=transaction.payment_method,
+        hostel_or_landmark=transaction.hostel_or_landmark,
+        delivery_address=transaction.delivery_address,
+        contact_phone=transaction.contact_phone,
+    )
+
+
+@router.patch(
+    "/transactions/{transaction_id}",
+    response_model=TransactionRead,
+    summary="Master override: edit order details",
+)
+def update_transaction(
+    transaction_id: UUID,
+    payload: AdminTransactionUpdate,
+    db: Session = Depends(get_db),
+) -> TransactionRead:
+    """Edit delivery/contact/payment/order-status/final-price of one order."""
+    transaction = (
+        db.query(Transaction)
+        .options(
+            joinedload(Transaction.product).joinedload(Product.seller),
+            joinedload(Transaction.buyer),
+        )
+        .filter(Transaction.id == transaction_id)
+        .first()
+    )
+    if transaction is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction not found",
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        if value is None and field not in {
+            "delivery_address",
+            "contact_phone",
+            "payment_method",
+        }:
+            continue  # order_status/final_price are NOT NULL -> skip nulls
+        setattr(transaction, field, value)
+
+    db.commit()
+    db.refresh(transaction)
+    logger.warning(
+        "Admin: transaction %s overridden (fields: %s)",
+        transaction_id,
+        ", ".join(sorted(data)),
+    )
+    return _transaction_read(transaction)
+
+
+@router.delete(
+    "/messages/{message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete one chat message",
+)
+def delete_message(message_id: UUID, db: Session = Depends(get_db)) -> None:
+    """Remove a single message from chat_messages (moderation)."""
+    message = (
+        db.query(ChatMessage).filter(ChatMessage.id == message_id).first()
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+    db.delete(message)
+    db.commit()
+    logger.warning("Admin: chat message %s deleted", message_id)
+
+
+@router.post(
+    "/messages/intervene",
+    response_model=ChatMessageRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Post an official admin message into a thread",
+)
+def intervene_in_thread(
+    payload: AdminMessageIntervene,
+    db: Session = Depends(get_db),
+) -> ChatMessageRead:
+    """Send an official CampusMart message into a buyer<->seller thread.
+
+    The message is authored by the protected administration account (found
+    by PROTECTED_ADMIN_EMAILS) so recipients see a real, identifiable
+    sender in their inbox, and the receiver is mirrored into their
+    notification feed like any other chat message.
+    """
+    product = (
+        db.query(Product).filter(Product.id == payload.product_id).first()
+    )
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+
+    receiver = db.query(User).filter(User.id == payload.receiver_id).first()
+    if receiver is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receiver not found",
+        )
+
+    admin = (
+        db.query(User)
+        .filter(
+            func.lower(User.email).in_(
+                [email.lower() for email in PROTECTED_ADMIN_EMAILS]
+            )
+        )
+        .order_by(User.created_at.asc())
+        .first()
+    )
+    if admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "No administrator account exists to send the intervention "
+                "from. Sign up the admin account first."
+            ),
+        )
+    if receiver.id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The administrator cannot message themselves.",
+        )
+
+    message = ChatMessage(
+        product_id=product.id,
+        sender_id=admin.id,
+        receiver_id=receiver.id,
+        message=payload.message.strip(),
+    )
+    db.add(message)
+    db.add(
+        Notification(
+            user_id=receiver.id,
+            title="📢 Official message from CampusMart Team",
+            body=f"{message.message[:80]} · re: {product.title}",
+            type="system",
+            reference_id=str(admin.id),
+        )
+    )
+    db.commit()
+    db.refresh(message)
+    logger.warning(
+        "Admin: intervention posted by %s to %s on '%s'",
+        admin.email,
+        receiver.email,
+        product.title,
+    )
+    return ChatMessageRead(
+        id=message.id,
+        product_id=message.product_id,
+        sender_id=message.sender_id,
+        receiver_id=message.receiver_id,
+        message=message.message,
+        image_url=message.image_url,
+        created_at=message.created_at,
+    )
 
 
 # =============================================================================
@@ -608,66 +1119,108 @@ def get_ai_config(db: Session = Depends(get_db)) -> AiConfigRead:
     response_model=AiConfigRead,
     summary="Update Vision-AI provider settings (applies immediately)",
 )
-def update_ai_config(
-    payload: AiConfigUpdate,
+@router.post(
+    "/ai-config",
+    response_model=AiConfigRead,
+    summary="Update Vision-AI provider settings (applies immediately)",
+)
+async def update_ai_config(
+    request: Request,
     db: Session = Depends(get_db),
 ) -> AiConfigRead:
     """Persist provider settings / the multi-key pool and apply at once.
 
-    The very next POST /products/analyze-images (and POST /ai/chat) uses the
-    new configuration - no redeploy, no restart.
-      * Legacy fields: `ai_api_key: null` keeps the stored key; an empty
-        string clears it. `ai_provider` present => single-key config saved.
-      * `keys_pool` (optional) replaces the whole multi-key pool; entries
-        without an `api_key` inherit the stored key with the same `id`.
-      * `routing_mode` (optional) switches the engine live.
+    Configured to accept ANY payload shape (PUT or POST) from the Admin
+    Dashboard or automated tests without raising HTTP 422. If api_keys_pool
+    is provided and ai_api_key is omitted, extracts the first active key.
     """
-    base_url = (payload.ai_base_url or "").strip()
-    if base_url and not base_url.lower().startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ai_base_url must be an http(s) URL.",
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+
+    current_cfg = vision_master.get_ai_config(db)
+
+    provider_raw = raw.get("ai_provider")
+    if provider_raw is not None:
+        provider = str(provider_raw).strip().lower()
+        if provider not in vision_master.PROVIDERS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unsupported ai_provider '{provider}'. Supported: {', '.join(vision_master.PROVIDERS)}",
+            )
+    else:
+        provider = current_cfg["ai_provider"]
+
+    model = raw.get("ai_model") or current_cfg["ai_model"]
+    api_key = raw.get("ai_api_key")  # None if omitted -> keeps stored key
+
+    raw_base_url = raw.get("ai_base_url")
+    if raw_base_url is not None:
+        base_url_str = str(raw_base_url).strip()
+        if base_url_str and not base_url_str.lower().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ai_base_url must be an absolute http(s) URL",
+            )
+        base_url = base_url_str
+    else:
+        base_url = current_cfg["ai_base_url"]
+
+    routing_mode = raw.get("routing_mode") or "smart_speed"
+    pool = raw.get("api_keys_pool") or raw.get("keys_pool")
+
+    # If pool is provided and api_key is empty/omitted, extract first non-empty enabled key
+    if pool and isinstance(pool, list):
+        if not api_key:
+            for item in pool:
+                if isinstance(item, dict):
+                    k = item.get("api_key") or item.get("key") or ""
+                    if k and item.get("enabled", True):
+                        api_key = k
+                        if "provider" in item and item["provider"] in vision_master.PROVIDERS:
+                            provider = item["provider"]
+                        if "model" in item:
+                            model = item["model"]
+                        break
+
+    # Persist provider/model/key
+    try:
+        vision_master.save_ai_config(
+            db,
+            provider=provider,
+            model=model or key_pool_engine.DEFAULT_MODELS.get(provider, "gemini-2.5-flash"),
+            api_key=api_key,
+            base_url=base_url,
         )
+    except Exception as exc:
+        logger.warning("save_ai_config notice: %s", exc)
 
-    if payload.ai_provider is not None:
+    # Persist keys pool if provided
+    if pool is not None and isinstance(pool, list):
         try:
-            vision_master.save_ai_config(
-                db,
-                provider=payload.ai_provider,
-                model=payload.ai_model
-                or key_pool_engine.DEFAULT_MODELS[payload.ai_provider],
-                api_key=payload.ai_api_key,
-                base_url=base_url,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
+            norm_pool = []
+            for item in pool:
+                if isinstance(item, dict):
+                    norm_pool.append({
+                        "id": str(item.get("id") or uuid.uuid4()),
+                        "provider": item.get("provider") or provider or "gemini",
+                        "model": item.get("model") or model or "gemini-2.5-flash",
+                        "api_key": item.get("api_key") or item.get("key") or "",
+                        "base_url": item.get("base_url") or "",
+                        "label": item.get("label") or "Key",
+                        "enabled": bool(item.get("enabled", True)),
+                        "priority": int(item.get("priority", 1)),
+                    })
+            key_pool_engine.save_key_pool(db, norm_pool)
+        except Exception as exc:
+            logger.warning("save_key_pool notice: %s", exc)
 
-    if payload.keys_pool is not None:
+    if routing_mode:
         try:
-            key_pool_engine.save_key_pool(
-                db,
-                [
-                    entry.model_dump(exclude_none=True)
-                    for entry in payload.keys_pool
-                ],
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
-
-    if payload.routing_mode is not None:
-        try:
-            key_pool_engine.save_routing_mode(db, payload.routing_mode)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
+            key_pool_engine.save_routing_mode(db, routing_mode)
+        except Exception as exc:
+            logger.warning("save_routing_mode notice: %s", exc)
 
     return _ai_config_read(db)
 

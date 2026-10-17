@@ -243,6 +243,9 @@ Return ONLY one JSON object (no markdown, no commentary, no code fences) with ex
   "title": string                  - compelling, accurate marketplace title with brand & model, <= 120 chars
   "description": string            - 2-4 professional, honest sentences: exact specs, condition, included accessories
   "category": string               - exactly one of {_CATEGORY_LIST}
+  "branch": string                 - one of "First Year (Common)", "Computer / IT", "Mechanical", "Electrical / ENTC", "Civil", "Pharmacy", "Architecture / Design", "All Branches"
+  "academic_year": string          - one of "FE (1st Year)", "SE (2nd Year)", "TE (3rd Year)", "BE (Final Year)", "All Years"
+  "whatsapp_pitch": string         - punchy 1-line WhatsApp highlight with emojis (e.g. "🔥 Casio 991EX ClassWiz in mint condition · FE/SE must-have!")
   "condition": string              - exactly one of "Like New", "Good", "Fair"
   "condition_notes": string        - detailed 4-angle inspection summary: front/back/side/label wear,
                                      scratches, dents, button/port condition, accessories/box.
@@ -445,6 +448,10 @@ def _normalize_analysis(
     tags = _clean_tags(raw.get("ai_tags"))
     title = str(raw.get("title") or "Campus listing").strip()[:200]
 
+    branch = str(raw.get("branch") or "All Branches").strip()
+    academic_year = str(raw.get("academic_year") or "All Years").strip()
+    whatsapp_pitch = str(raw.get("whatsapp_pitch") or f"🔥 {title} in {condition} condition · ₹{listed:.0f} only!").strip()[:300]
+
     return {
         "source": provider,
         "provider": provider,
@@ -456,6 +463,9 @@ def _normalize_analysis(
         "title": title,
         "description": str(raw.get("description") or title).strip()[:4000],
         "category": category,
+        "branch": branch,
+        "academic_year": academic_year,
+        "whatsapp_pitch": whatsapp_pitch,
         "condition": condition,
         "condition_notes": str(
             raw.get("condition_notes")
@@ -862,6 +872,10 @@ def heuristic_analyze(
             tags.append(extra)
     tags = tags[:15]
 
+    branch = "First Year (Common)" if matched_category in ("Lab Gear & Instruments", "Academic Material") else "Computer / IT"
+    academic_year = "FE (1st Year)" if branch == "First Year (Common)" else "All Years"
+    whatsapp_pitch = f"🔥 {base_title} · ₹{listed:.0f} only on CampusMart AI"
+
     return {
         "source": "heuristic",
         "provider": "heuristic",
@@ -871,6 +885,9 @@ def heuristic_analyze(
         "title": base_title[:200],
         "description": base_description[:4000],
         "category": matched_category,
+        "branch": branch,
+        "academic_year": academic_year,
+        "whatsapp_pitch": whatsapp_pitch,
         "condition": normalized_condition,
         "condition_notes": (
             f"Heuristic INR estimate from {len(image_urls)} photo(s): "

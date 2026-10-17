@@ -22,6 +22,7 @@ filters on status='active'.
 """
 
 import logging
+import re
 from uuid import UUID
 
 from fastapi import (
@@ -49,7 +50,7 @@ from ..auth import (
 )
 from ..database import get_db
 from ..email_service import send_listing_published_email
-from ..models import Notification, Product, User
+from ..models import Notification, Product, User, WantedRequest
 from ..schemas import (
     AnalyzeImagesRequest,
     AnalyzeImagesResponse,
@@ -239,12 +240,17 @@ def create_product(
         or None
     )
 
+    branch = (payload.branch or "All Branches").strip()
+    academic_year = (payload.academic_year or "All Years").strip()
+
     product = Product(
         seller_id=seller.id,       # FK: authenticated seller's profile row
         title=payload.title,
         description=payload.description,
         # AI owns category since Phase 3 (any client value is ignored).
         category=ai_result["extracted_category"],
+        branch=branch,
+        academic_year=academic_year,
         condition=payload.condition,
         image_url=payload.image_url,
         image_urls=image_urls,
@@ -301,6 +307,40 @@ def create_product(
                 "College listing notifications: %s classmates of %s alerted",
                 len(classmates), college_name,
             )
+
+    # Reverse Trigger: Match against open WantedRequest posts
+    if new_status == "active":
+        try:
+            wanted_matches = (
+                db.query(WantedRequest)
+                .filter(
+                    WantedRequest.status == "open",
+                    WantedRequest.user_id != seller.id,
+                    WantedRequest.max_budget >= (product.listed_price * 0.85),
+                )
+                .all()
+            )
+            p_text = f"{product.title} {product.description} {product.category} {product.ai_tags or ''}".lower()
+            notified_wanted = 0
+            for w_req in wanted_matches:
+                w_tokens = set(re.findall(r"\b[a-z0-9]{3,}\b", f"{w_req.title} {w_req.category} {w_req.ai_keywords or ''}".lower()))
+                if any(t in p_text for t in w_tokens) or w_req.category.lower() == product.category.lower():
+                    db.add(
+                        Notification(
+                            user_id=w_req.user_id,
+                            title=f"🎯 Match Found! Someone listed '{product.title}'",
+                            body=f"Someone just listed '{product.title}' for ₹{product.listed_price:,.0f} matching your Wanted post!",
+                            type="wanted_match",
+                            reference_id=str(product.id),
+                            is_read=False,
+                        )
+                    )
+                    notified_wanted += 1
+            if notified_wanted > 0:
+                db.commit()
+                logger.info("Reverse trigger: %d WantedRequest requesters notified", notified_wanted)
+        except Exception as exc:
+            logger.warning("Reverse trigger notice: %s", exc)
 
     product_snapshot = {
         "title": product.title,
@@ -398,36 +438,54 @@ def list_active_products(
                     "toggle, case-insensitive (e.g. 'COEP Technological "
                     "University, Pune').",
     ),
+    college_name: str | None = Query(
+        default=None,
+        max_length=255,
+        description="Alias for college filter.",
+    ),
+    branch: str | None = Query(
+        default=None,
+        max_length=80,
+        description="Academic branch (e.g. 'Computer / IT', 'Mechanical').",
+    ),
+    academic_year: str | None = Query(
+        default=None,
+        max_length=50,
+        description="Academic year (e.g. 'FE (1st Year)', 'SE (2nd Year)').",
+    ),
     db: Session = Depends(get_db),
 ) -> list[Product]:
-    """Return products currently marked 'active', newest first.
-
-    Public endpoint (no auth) so browsing works before login. By design this
-    also hides 'flagged' (fraud-suspect) listings from buyers.
-
-    Search (Task 3): `?q=` matches ANY of title / description / category /
-    ai_tags / ai_condition_notes with case-insensitive substring semantics, so
-    "bluetooth audio", "bose" or "music box" all surface a speaker the vision
-    AI analysed. `?category=` applies the marketplace chip filter server-side.
-    `?college=` powers the college-network "🎓 My College" toggle.
-    """
+    """Return products currently marked 'active', newest first."""
     query = db.query(Product)
-    # Phase 4: eager-load the seller so `product.seller_trust_score` (the
-    # read-only property consumed by ProductRead) does not trigger an
-    # N+1 query per listing on the feed.
     query = query.options(joinedload(Product.seller)).filter(Product.status == "active")
 
     if category and category.strip():
-        # Exact (case-insensitive) chip filter - LIKE wildcards typed by a
-        # user are escaped so "%"/"_" stay literal characters.
         query = query.filter(
             Product.category.ilike(_escape_like(category.strip()), escape="\\")
         )
 
-    if college and college.strip():
-        # "My College" toggle: exact campus match (case-insensitive).
+    target_college = (college_name or college or "").strip()
+    if target_college:
         query = query.filter(
-            Product.college_name.ilike(_escape_like(college.strip()), escape="\\")
+            Product.college_name.ilike(_escape_like(target_college), escape="\\")
+        )
+
+    if branch and branch.strip() and branch.strip() != "All Branches":
+        query = query.filter(
+            or_(
+                Product.branch == branch.strip(),
+                Product.branch == "All Branches",
+                Product.branch.is_(None),
+            )
+        )
+
+    if academic_year and academic_year.strip() and academic_year.strip() != "All Years":
+        query = query.filter(
+            or_(
+                Product.academic_year == academic_year.strip(),
+                Product.academic_year == "All Years",
+                Product.academic_year.is_(None),
+            )
         )
 
     term = (q or "").strip()
@@ -455,12 +513,7 @@ def get_product(
     product_id: UUID,
     db: Session = Depends(get_db),
 ) -> Product:
-    """Public single-listing lookup (bell-notification deep links).
-
-    Returns any listing regardless of status so a buyer who received an
-    order/college alert can still open the (possibly now-sold) product card;
-    the client renders the status badge from `product_status`/`status`.
-    """
+    """Public single-listing lookup."""
     product = (
         db.query(Product)
         .options(joinedload(Product.seller))
@@ -473,6 +526,41 @@ def get_product(
             detail="Product not found (it may have been removed).",
         )
     return product
+
+
+@router.get(
+    "/{product_id}/share-card",
+    summary="Get 1-click WhatsApp share card & deep link metadata",
+)
+def get_product_share_card(
+    product_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Returns pre-formatted WhatsApp share text and deep link for viral group sharing."""
+    product = (
+        db.query(Product)
+        .options(joinedload(Product.seller))
+        .filter(Product.id == product_id)
+        .first()
+    )
+    if product is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found",
+        )
+    read = ProductRead.model_validate(product)
+    return {
+        "product_id": str(product.id),
+        "title": product.title,
+        "listed_price": product.listed_price,
+        "suggested_price": product.suggested_price,
+        "branch": product.branch,
+        "academic_year": product.academic_year,
+        "college_name": product.college_name,
+        "seller_trust_score": read.seller_trust_score,
+        "deep_link": f"https://campus-mart-ivory.vercel.app/marketplace?item={product.id}",
+        "whatsapp_share_text": read.whatsapp_share_text,
+    }
 
 
 @router.delete(

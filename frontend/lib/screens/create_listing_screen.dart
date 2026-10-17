@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/ai_analysis.dart';
+import '../models/product.dart';
 import '../providers/auth_provider.dart';
 import '../providers/product_provider.dart';
 import '../services/api_service.dart';
@@ -60,6 +62,28 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
 
   /// 1-based slot currently uploading (0 while idle) for the tile spinner.
   int _uploadingSlot = 0;
+
+  static const List<String> _branches = <String>[
+    'First Year (Common)',
+    'Computer / IT',
+    'Mechanical',
+    'Electrical / ENTC',
+    'Civil',
+    'Pharmacy',
+    'Architecture / Design',
+    'All Branches',
+  ];
+
+  static const List<String> _academicYears = <String>[
+    'FE (1st Year)',
+    'SE (2nd Year)',
+    'TE (3rd Year)',
+    'BE (Final Year)',
+    'All Years',
+  ];
+
+  String? _branch;
+  String? _academicYear;
 
   String _condition = _conditions.first;
 
@@ -352,6 +376,12 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
           if (_conditions.contains(result.condition)) {
             _condition = result.condition;
           }
+          if (result.branch != null && result.branch!.isNotEmpty) {
+            _branch = result.branch;
+          }
+          if (result.academicYear != null && result.academicYear!.isNotEmpty) {
+            _academicYear = result.academicYear;
+          }
           if (!_priceEdited && _priceController.text.trim().isEmpty) {
             _priceController.text =
                 result.listedPriceInr.toStringAsFixed(0);
@@ -440,10 +470,15 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
       'condition': _condition,
       'image_url': _photos.first,
       'image_urls': _photos,
+      if (_branch != null && _branch!.isNotEmpty) 'branch': _branch,
+      if (_academicYear != null && _academicYear!.isNotEmpty)
+        'academic_year': _academicYear,
       if (analysis != null) ...{
         'ai_tags': analysis.tagsCsv,
         'ai_condition_notes': analysis.conditionNotes,
         'ai_suggested_price': analysis.suggestedPriceInr,
+        if (analysis.whatsappPitch != null && analysis.whatsappPitch!.isNotEmpty)
+          'whatsapp_share_text': analysis.whatsappPitch,
       },
       'listed_price': double.parse(_priceController.text.trim()),
       // `category` omitted on purpose: the AI pipeline owns it (Phase 3).
@@ -453,22 +488,9 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     if (!mounted) return;
 
     if (created != null) {
-      final suggested = created.suggestedPrice;
-      messenger.showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.success.withOpacity(0.92),
-          content: Text(
-            'AI analysis complete - ${created.category}'
-            '${suggested == null ? '' : ' - suggested ${formatInr(suggested)}'}',
-            style: const TextStyle(
-              color: Colors.black,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      );
       _resetForm();
       widget.onListingCreated();
+      _showCelebrationModal(created);
     } else {
       messenger.showSnackBar(
         SnackBar(
@@ -482,6 +504,106 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     }
   }
 
+  void _showCelebrationModal(Product product) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Text('🎉 ', style: TextStyle(fontSize: 22)),
+            Expanded(
+              child: Text(
+                'Listing Published Live!',
+                style: TextStyle(
+                  color: AppColors.inkBlack,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Your "${product.title}" is now active in your college marketplace at ${formatInr(product.listedPrice)}.',
+              style: const TextStyle(color: AppColors.textPrimary, fontSize: 13.5),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF25D366).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF25D366).withOpacity(0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.bolt, size: 14, color: Color(0xFF15803D)),
+                      SizedBox(width: 4),
+                      Text(
+                        'AI Viral WhatsApp Pitch:',
+                        style: TextStyle(
+                          color: Color(0xFF15803D),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    product.whatsappShareText ??
+                        '🔥 ${product.title} listed on CampusMart for ${formatInr(product.listedPrice)}!',
+                    style: const TextStyle(
+                      color: AppColors.inkBlack,
+                      fontSize: 12.5,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('View Feed', style: TextStyle(color: AppColors.textMuted)),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              final text = product.whatsappShareText ??
+                  '🔥 *${product.title}* listed on CampusMart for *${formatInr(product.listedPrice)}*!\n'
+                  'Check it out on CampusMart AI: https://campusmart-api-zia4.onrender.com/products/${product.id}';
+              final url = Uri.parse('https://api.whatsapp.com/send?text=${Uri.encodeComponent(text)}');
+              try {
+                if (await canLaunchUrl(url)) {
+                  await launchUrl(url, mode: LaunchMode.externalApplication);
+                }
+              } catch (_) {}
+            },
+            icon: const Icon(Icons.share, size: 16),
+            label: const Text('Share to WhatsApp Groups'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF25D366),
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _resetForm() {
     _formKey.currentState?.reset();
     _titleController.clear();
@@ -490,6 +612,8 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
     _priceController.clear();
     setState(() {
       _condition = _conditions.first;
+      _branch = null;
+      _academicYear = null;
       _photos.clear();
       _analysis = null;
       _isScanning = false;
@@ -634,6 +758,46 @@ class _CreateListingScreenState extends State<CreateListingScreen> {
                     ? null
                     : (value) =>
                         setState(() => _condition = value ?? _condition),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: _branch,
+                dropdownColor: AppColors.surfaceHigh,
+                decoration: const InputDecoration(
+                  labelText: 'Target Branch (Auto-detected by AI)',
+                  hintText: 'Select Branch',
+                ),
+                items: _branches
+                    .map(
+                      (b) => DropdownMenuItem<String>(
+                        value: b,
+                        child: Text(b),
+                      ),
+                    )
+                    .toList(),
+                onChanged: isSubmitting
+                    ? null
+                    : (value) => setState(() => _branch = value),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: _academicYear,
+                dropdownColor: AppColors.surfaceHigh,
+                decoration: const InputDecoration(
+                  labelText: 'Academic Year (Auto-detected by AI)',
+                  hintText: 'Select Year',
+                ),
+                items: _academicYears
+                    .map(
+                      (y) => DropdownMenuItem<String>(
+                        value: y,
+                        child: Text(y),
+                      ),
+                    )
+                    .toList(),
+                onChanged: isSubmitting
+                    ? null
+                    : (value) => setState(() => _academicYear = value),
               ),
               const SizedBox(height: 28),
               FilledButton(

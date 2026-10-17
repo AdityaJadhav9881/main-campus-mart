@@ -16,6 +16,9 @@ class AiPhotoAnalysis {
     required this.imageUrls,
     this.brand,
     this.modelName,
+    this.branch,
+    this.academicYear,
+    this.whatsappPitch,
   });
 
   factory AiPhotoAnalysis.fromJson(Map<String, dynamic> json) {
@@ -30,6 +33,9 @@ class AiPhotoAnalysis {
       source: json['source']?.toString() ?? 'heuristic',
       brand: json['brand']?.toString(),
       modelName: json['model_name']?.toString(),
+      branch: json['branch']?.toString(),
+      academicYear: json['academic_year']?.toString(),
+      whatsappPitch: json['whatsapp_pitch']?.toString(),
       title: json['title']?.toString() ?? '',
       description: json['description']?.toString() ?? '',
       category: json['category']?.toString() ?? 'Electronics',
@@ -52,6 +58,9 @@ class AiPhotoAnalysis {
   final String source;
   final String? brand;
   final String? modelName;
+  final String? branch;
+  final String? academicYear;
+  final String? whatsappPitch;
   final String title;
   final String description;
   final String category;

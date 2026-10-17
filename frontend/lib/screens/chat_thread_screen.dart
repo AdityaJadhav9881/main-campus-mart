@@ -299,11 +299,27 @@ class _ChatThreadScreenState extends State<ChatThreadScreen> {
   /// Opens the in-app call screen (Task 6); on hang-up the outcome is logged
   /// via POST /chats/call-event so both sides see the call bubble.
   Future<void> _startCall({required bool video}) async {
+    final auth = context.read<AuthProvider>();
+    String? callId;
+    try {
+      final session = await _api.initiateCall(
+        receiverId: widget.otherUserId,
+        productId: widget.productId,
+        callType: video ? 'video' : 'voice',
+        token: auth.token,
+      );
+      callId = session.id;
+    } catch (_) {}
+
+    if (!mounted) return;
     final outcome = await Navigator.of(context).push<CallOutcome>(
       MaterialPageRoute<CallOutcome>(
         builder: (_) => InAppCallScreen(
           receiverName: widget.otherUserName,
           initialVideo: video,
+          callId: callId,
+          token: auth.token,
+          isReceiver: false,
         ),
       ),
     );

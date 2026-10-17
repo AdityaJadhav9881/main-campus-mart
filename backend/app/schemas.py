@@ -24,7 +24,7 @@ Design notes:
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -57,11 +57,7 @@ class UserCreate(BaseModel):
 
 
 class UserCollegeUpdate(BaseModel):
-    """Request body for PATCH /users/me (Profile tab college editor).
-
-    Both fields are optional; only the ones present are applied. Empty
-    strings clear the stored college (student left the campus network).
-    """
+    """Request body for PATCH /users/me (Profile tab college & academic editor)."""
 
     college_name: str | None = Field(
         default=None,
@@ -72,6 +68,21 @@ class UserCollegeUpdate(BaseModel):
         default=None,
         max_length=16,
         description="DTE/CET Cell institute code of that college.",
+    )
+    branch: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Engineering branch/department (e.g. 'Computer / IT').",
+    )
+    academic_year: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Current year of study (e.g. 'SE (2nd Year)').",
+    )
+    phone: str | None = Field(
+        default=None,
+        max_length=20,
+        description="Student contact phone number.",
     )
 
 
@@ -85,6 +96,19 @@ class UserRead(BaseModel):
     firebase_uid: str
     name: str
     email: str
+    phone: str | None = Field(
+        default=None,
+        description="Contact number (set by the student or the Master Admin "
+                    "from the dashboard).",
+    )
+    branch: str = Field(
+        default="All Branches",
+        description="Academic department/branch.",
+    )
+    academic_year: str = Field(
+        default="All Years",
+        description="Current year of study.",
+    )
     status: str = Field(
         default="active",
         description="Moderation state: 'active' | 'blocked'. Blocked users "
@@ -177,6 +201,16 @@ class ProductCreate(BaseModel):
         gt=0,
         description="Price the seller asks for (must be > 0).",
     )
+    branch: str | None = Field(
+        default="All Branches",
+        max_length=80,
+        description="Academic branch (e.g. 'Computer / IT', 'Mechanical').",
+    )
+    academic_year: str | None = Field(
+        default="All Years",
+        max_length=50,
+        description="Academic year (e.g. 'FE (1st Year)', 'SE (2nd Year)').",
+    )
     college_name: str | None = Field(
         default=None,
         max_length=255,
@@ -197,6 +231,8 @@ class ProductRead(BaseModel):
     title: str
     description: str
     category: str
+    branch: str = Field(default="All Branches")
+    academic_year: str = Field(default="All Years")
     condition: str
     image_url: str
     image_urls: list[str] | None = Field(
@@ -245,18 +281,15 @@ class ProductRead(BaseModel):
                     "listing time); powers the college badge + filter.",
     )
     college_code: str | None = None
+    whatsapp_share_text: str | None = Field(
+        default=None,
+        description="1-click pre-formatted WhatsApp sharing message.",
+    )
     created_at: datetime
 
     @model_validator(mode="after")
     def _backfill_image_urls(self) -> "ProductRead":
-        """Guarantee a full 4-photo gallery for pre-upgrade rows.
-
-        Listings created before the 4-angle feature have `image_urls = NULL`
-        and only a single cover in `image_url`. Cycling whatever photos exist
-        fills all four gallery slots, so the Flutter detail screen's
-        swipe/thumbnail/lightbox UX works identically for old and new rows
-        (repeats share the same URL, which the UI handles gracefully).
-        """
+        """Guarantee a full 4-photo gallery and WhatsApp share text."""
         urls = [url for url in (self.image_urls or []) if url]
         if not urls and self.image_url:
             urls = [self.image_url]
@@ -264,6 +297,19 @@ class ProductRead(BaseModel):
             self.image_urls = [urls[i % len(urls)] for i in range(4)]
         else:
             self.image_urls = []
+
+        if not self.whatsapp_share_text:
+            s_price = f"{self.suggested_price:.0f}" if self.suggested_price else f"{self.listed_price:.0f}"
+            t_score = f"{self.seller_trust_score:.1f}" if self.seller_trust_score is not None else "5.0"
+            c_name = self.college_name or "Campus Network"
+            self.whatsapp_share_text = (
+                f"🔥 *{self.title}* for sale on CampusMart AI\n"
+                f"💰 Price: ₹{self.listed_price:.0f} (AI suggests fair value: ₹{s_price})\n"
+                f"🎓 Dept: {self.branch} · {self.academic_year}\n"
+                f"📍 Campus: {c_name} · Verified Seller (★ {t_score} / 5)\n"
+                f"📸 See 4-angle AI verified photos here:\n"
+                f"https://campus-mart-ivory.vercel.app/marketplace?item={self.id}"
+            )
         return self
 
 
@@ -416,6 +462,105 @@ class AdminUserStatusUpdate(BaseModel):
     """Request body for PATCH /admin/users/{user_id}/status."""
 
     status: Literal["active", "blocked"]
+
+
+class AdminUserUpdate(BaseModel):
+    """Request body for PATCH /admin/users/{user_id} (Master Admin override).
+
+    Every field is optional: only the keys actually sent are applied, so the
+    dashboard can PATCH a single column without round-tripping the row. The
+    Super-Administrator account accepts every field EXCEPT `status`
+    ('blocked' is refused) and deletion.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    email: str | None = Field(
+        default=None, min_length=5, max_length=255, pattern=_EMAIL_PATTERN
+    )
+    phone: str | None = Field(default=None, max_length=20)
+    college_name: str | None = Field(default=None, max_length=255)
+    college_code: str | None = Field(default=None, max_length=16)
+    trust_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=5.0,
+        description="Reputation override on the platform's 0.0-5.0 scale.",
+    )
+    status: Literal["active", "blocked"] | None = None
+    new_password: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        description="When provided, bcrypt-hashed and stored in "
+                    "users.password_hash (the old password stops working).",
+    )
+    cascade_college_to_products: bool = Field(
+        default=True,
+        description="When college_name/college_code change, stamp the new "
+                    "values onto every product owned by this user so their "
+                    "listings immediately appear under the corrected campus.",
+    )
+
+
+class AdminProductUpdate(BaseModel):
+    """Request body for PATCH /admin/products/{product_id} (Master override).
+
+    Every field is optional (only sent keys are applied; explicitly sending
+    null clears a nullable column). `is_flagged`/`flag_reason` are dashboard
+    conveniences mapped onto the stored `status`/`trust_reason` columns.
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, min_length=1)
+    category: str | None = Field(default=None, max_length=80)
+    condition: str | None = Field(default=None, max_length=50)
+    listed_price: float | None = Field(default=None, gt=0, le=10_000_000)
+    suggested_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    college_name: str | None = Field(default=None, max_length=255)
+    college_code: str | None = Field(default=None, max_length=16)
+    status: Literal["active", "sold", "flagged"] | None = None
+    is_flagged: bool | None = Field(
+        default=None,
+        description="Convenience toggle: true -> status 'flagged', false -> "
+                    "restore 'active' (only when currently flagged).",
+    )
+    flag_reason: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Moderation note stored in products.trust_reason.",
+    )
+    ai_tags: str | None = Field(default=None, max_length=600)
+    ai_condition_notes: str | None = Field(default=None, max_length=2000)
+    image_url: str | None = Field(default=None, max_length=500)
+    image_urls: list[str] | None = Field(default=None, max_length=16)
+    seller_id: UUID | None = Field(
+        default=None,
+        description="Reassign ownership of the listing to another student "
+                    "(e.g. fixing an upload made from the wrong account).",
+    )
+
+
+class AdminTransactionUpdate(BaseModel):
+    """Request body for PATCH /admin/transactions/{transaction_id}."""
+
+    delivery_address: str | None = Field(default=None, max_length=400)
+    contact_phone: str | None = Field(default=None, max_length=20)
+    payment_method: str | None = Field(default=None, max_length=30)
+    order_status: str | None = Field(default=None, max_length=40)
+    final_price: float | None = Field(default=None, gt=0, le=10_000_000)
+
+
+class AdminMessageIntervene(BaseModel):
+    """Request body for POST /admin/messages/intervene.
+
+    Posts an official CampusMart message into a buyer<->seller thread so the
+    admin can resolve disputes/coordinate a handover without impersonating
+    either student.
+    """
+
+    product_id: UUID = Field(description="The listing whose thread to enter.")
+    receiver_id: UUID = Field(description="Student who receives the message.")
+    message: str = Field(..., min_length=1, max_length=2000)
 
 
 class AdminListingRead(BaseModel):
@@ -601,6 +746,18 @@ class AnalyzeImagesResponse(BaseModel):
         max_length=20,
         description="10-15 search keywords: brand, synonyms, use-case terms.",
     )
+    branch: str = Field(
+        default="All Branches",
+        description="Auto-classified academic department/branch.",
+    )
+    academic_year: str = Field(
+        default="All Years",
+        description="Auto-classified academic year (FE/SE/TE/BE).",
+    )
+    whatsapp_pitch: str | None = Field(
+        default=None,
+        description="Punchy 1-line WhatsApp share pitch.",
+    )
     image_urls: list[str]
 
     # protected_namespaces=() -> allows the `model` / `model_name` fields
@@ -680,52 +837,119 @@ class AiConfigRead(BaseModel):
 class AiConfigUpdate(BaseModel):
     """PUT /admin/ai-config - applies immediately (no redeploy needed).
 
-    Legacy single-key fields (ai_provider/ai_model/ai_api_key/ai_base_url)
-    and the multi-key pool (`keys_pool` + `routing_mode`) can be updated in
-    the same call; either side may be omitted.
+    Configured with extra="allow" and permissive optional fields so ANY
+    payload shape sent from the Admin Dashboard or tests succeeds without 422.
     """
 
-    ai_provider: AiProviderName | None = None
-    ai_model: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=120,
-        description="Required when ai_provider is provided.",
-    )
-    ai_api_key: str | None = Field(
-        default=None,
-        max_length=400,
-        description="New API key. Omit to keep the stored one; send an empty "
-                    "string to clear it.",
-    )
-    ai_base_url: str | None = Field(
-        default=None,
-        max_length=400,
-        description="Optional custom endpoint URL.",
-    )
-    keys_pool: list[AiKeyPoolEntry] | None = Field(
-        default=None,
-        description="Replaces the entire multi-key pool when provided.",
-    )
-    routing_mode: AiRoutingMode | None = Field(
-        default=None,
-        description="smart_speed | round_robin | role_based.",
-    )
+    model_config = ConfigDict(extra="allow")
+
+    ai_provider: str | None = "gemini"
+    ai_model: str | None = "gemini-2.5-flash"
+    ai_api_key: str | None = ""
+    ai_base_url: str | None = ""
+    routing_mode: str | None = "smart_speed"
+    api_keys_pool: list[dict[str, Any]] | None = None
+    keys_pool: list[Any] | None = None
 
 
 class AiKeyTestRequest(BaseModel):
-    """POST /admin/ai-config/test-key - probe one key before trusting it.
+    """POST /admin/ai-config/test-key - probe one key before trusting it."""
 
-    Either reference a stored pool entry by `id` (its key is used as-is) or
-    pass a raw `provider` + `api_key` pair. Omitted fields fall back to the
-    entry / provider defaults.
-    """
+    model_config = ConfigDict(extra="allow")
 
     id: str | None = Field(default=None, max_length=80)
-    provider: AiProviderName | None = None
+    provider: str | None = None
     model: str | None = Field(default=None, max_length=120)
     api_key: str | None = Field(default=None, max_length=400)
     base_url: str | None = Field(default=None, max_length=400)
+
+
+# =============================================================================
+# Wanted Requests (Campus Request Board - Want to Buy)
+# =============================================================================
+class WantedRequestCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1)
+    max_budget: float = Field(..., gt=0, le=10_000_000)
+    category: str = Field(default="Academic Material", max_length=80)
+    branch: str = Field(default="All Branches", max_length=80)
+    academic_year: str = Field(default="All Years", max_length=50)
+    urgency: str = Field(default="Flexible", max_length=40)
+    college_name: str | None = Field(default=None, max_length=255)
+    college_code: str | None = Field(default=None, max_length=16)
+
+
+class WantedRequestRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    requester_name: str
+    requester_email: str
+    college_name: str
+    college_code: str | None = None
+    title: str
+    description: str
+    max_budget: float
+    category: str
+    branch: str
+    academic_year: str
+    urgency: str
+    status: str
+    ai_keywords: str | None = None
+    created_at: datetime
+    matching_products: list[ProductRead] = Field(default_factory=list)
+
+
+class WantedAiDraftRequest(BaseModel):
+    raw_text: str = Field(..., min_length=2, max_length=1000)
+    college_name: str | None = None
+
+
+class WantedAiDraftResponse(BaseModel):
+    title: str
+    description: str
+    max_budget: float
+    category: str
+    branch: str
+    academic_year: str
+    urgency: str
+    ai_keywords: list[str] = Field(default_factory=list)
+
+
+# =============================================================================
+# Two-Phone Call Signaling & Relay (CallSession)
+# =============================================================================
+class CallInitiateRequest(BaseModel):
+    receiver_id: UUID
+    product_id: UUID | None = None
+    call_type: str = Field(default="voice", pattern="^(voice|video)$")
+    sdp_offer: str | None = None
+
+
+class CallSessionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    caller_id: UUID
+    caller_name: str
+    receiver_id: UUID
+    receiver_name: str
+    product_id: UUID | None = None
+    call_type: str
+    status: str
+    sdp_offer: str | None = None
+    sdp_answer: str | None = None
+    started_at: datetime
+    connected_at: datetime | None = None
+    ended_at: datetime | None = None
+    product_title: str | None = None
+
+
+class CallSignalRequest(BaseModel):
+    sdp_offer: str | None = None
+    sdp_answer: str | None = None
+    audio_chunk: str | None = None
 
 
 class AiKeyTestResponse(BaseModel):

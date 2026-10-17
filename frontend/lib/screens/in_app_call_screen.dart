@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../widgets/app_theme.dart';
 
+import '../services/api_service.dart';
+
 /// Outcome returned to the chat thread when a call screen is closed.
 class CallOutcome {
   const CallOutcome({
@@ -20,21 +22,22 @@ class CallOutcome {
   final String callType;
 }
 
-/// Full-screen in-app call UI for a buyer-seller thread (Part B Task 6).
-///
-/// Purely local experience: connecting pulse -> connected timer -> control
-/// dock (Mute / Speaker / Toggle Video / End). On hang-up it pops a
-/// [CallOutcome] which the chat screen logs via POST /chats/call-event so the
-/// call shows up as a bubble + bell notification for the other side.
+/// Full-screen in-app call UI for a buyer-seller thread with real two-phone signaling.
 class InAppCallScreen extends StatefulWidget {
   const InAppCallScreen({
     super.key,
     required this.receiverName,
     this.initialVideo = false,
+    this.callId,
+    this.token,
+    this.isReceiver = false,
   });
 
   final String receiverName;
   final bool initialVideo;
+  final String? callId;
+  final String? token;
+  final bool isReceiver;
 
   @override
   State<InAppCallScreen> createState() => _InAppCallScreenState();
@@ -49,7 +52,7 @@ class _InAppCallScreenState extends State<InAppCallScreen>
   bool _muted = false;
   bool _speaker = false;
   late bool _video;
-  Timer? _connectTimer;
+  Timer? _pollTimer;
   Timer? _callTimer;
 
   @override
@@ -60,27 +63,63 @@ class _InAppCallScreenState extends State<InAppCallScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1800),
     )..repeat();
-    // Simulated pickup: after a short ring the peer "answers" and the
-    // duration timer starts.
-    _connectTimer = Timer(const Duration(milliseconds: 1600), () {
-      if (!mounted) return;
-      setState(() => _connected = true);
-      _callTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (!mounted) return;
-        setState(() => _seconds += 1);
+
+    if (widget.isReceiver) {
+      _startConnectedTimer();
+    } else if (widget.callId != null && widget.token != null) {
+      // Poll Phone 2 ringing/answer status every 1.5 seconds
+      _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+        try {
+          final session = await ApiService.instance.fetchCallSession(
+            widget.callId!,
+            token: widget.token!,
+          );
+          if (!mounted) return;
+          if (session.status == 'connected' && !_connected) {
+            _startConnectedTimer();
+          } else if (session.status == 'declined' || session.status == 'ended') {
+            _pollTimer?.cancel();
+            _hangUp();
+          }
+        } catch (_) {}
       });
+    } else {
+      // Local fallback
+      Timer(const Duration(milliseconds: 1600), () {
+        if (!mounted) return;
+        _startConnectedTimer();
+      });
+    }
+  }
+
+  void _startConnectedTimer() {
+    _pollTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _connected = true);
+    _callTimer?.cancel();
+    _callTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _seconds += 1);
     });
   }
 
   @override
   void dispose() {
-    _connectTimer?.cancel();
+    _pollTimer?.cancel();
     _callTimer?.cancel();
     _pulse.dispose();
     super.dispose();
   }
 
-  void _hangUp() {
+  Future<void> _hangUp() async {
+    _pollTimer?.cancel();
+    _callTimer?.cancel();
+    if (widget.callId != null && widget.token != null) {
+      try {
+        await ApiService.instance.endCall(widget.callId!, token: widget.token!);
+      } catch (_) {}
+    }
+    if (!mounted) return;
     Navigator.of(context).pop(
       CallOutcome(
         status: _connected ? 'completed' : 'missed',
@@ -142,11 +181,15 @@ class _InAppCallScreenState extends State<InAppCallScreen>
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    _connected ? 'Connected · $_timerLabel' : 'Ringing...',
+                    _connected
+                        ? 'Connected · $_timerLabel'
+                        : (widget.isReceiver
+                            ? 'Connecting...'
+                            : "Calling... Ringing on student's phone..."),
                     style: TextStyle(
                       color: _connected
                           ? const Color(0xFF34D399)
-                          : Colors.white54,
+                          : Colors.white70,
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
                     ),

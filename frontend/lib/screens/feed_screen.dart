@@ -4,10 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/product.dart';
+import '../models/wanted_request.dart';
 import '../providers/auth_provider.dart';
 import '../providers/cart_provider.dart';
 import '../providers/product_provider.dart';
+import '../services/api_service.dart';
 import '../services/currency.dart';
+import '../services/local_cache_service.dart';
 import '../services/notification_service.dart';
 import '../services/recommendations.dart';
 import '../widgets/animated_brand_logo.dart';
@@ -15,6 +18,7 @@ import '../widgets/app_theme.dart';
 import '../widgets/college_picker_sheet.dart';
 import '../widgets/product_card.dart';
 import 'cart_screen.dart';
+import 'incoming_call_overlay.dart';
 import 'notifications_screen.dart';
 import 'product_detail_screen.dart';
 
@@ -56,13 +60,29 @@ const List<_SortOption> _sortOptions = <_SortOption>[
   _SortOption('trust', 'Highest Trust', Icons.shield_outlined),
 ];
 
-/// Preferred display order for the marketplace's known categories; anything
-/// else discovered in the feed is appended alphabetically.
 const List<String> _knownCategories = <String>[
   'Electronics',
   'Academic Material',
   'Lab Gear & Instruments',
   'Other',
+];
+
+const List<String> _branchOptions = <String>[
+  'All Branches',
+  'Computer / IT',
+  'Mechanical',
+  'Civil',
+  'Electrical / ENTC',
+  'Pharmacy',
+  'First Year (Common)',
+];
+
+const List<String> _yearOptions = <String>[
+  'All Years',
+  'FE',
+  'SE',
+  'TE',
+  'BE',
 ];
 
 class _FeedScreenState extends State<FeedScreen> {
@@ -88,6 +108,12 @@ class _FeedScreenState extends State<FeedScreen> {
   /// by students of the signed-in student's own college (`?college=`).
   bool _myCollegeOnly = false;
 
+  String _selectedBranch = 'All Branches';
+  String _selectedYear = 'All Years';
+  List<WantedRequest> _wantedRequests = <WantedRequest>[];
+  Timer? _callPoller;
+  String? _lastHandledCallId;
+
   @override
   void initState() {
     super.initState();
@@ -99,15 +125,52 @@ class _FeedScreenState extends State<FeedScreen> {
         _scheduleWarmup();
         provider.loadProducts();
       }
+      _fetchWantedRequests();
     });
+
+    _callPoller = Timer.periodic(const Duration(seconds: 5), (_) => _checkIncomingCall());
   }
 
   @override
   void dispose() {
     _searchDebounce?.cancel();
     _warmupTimer?.cancel();
+    _callPoller?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _fetchWantedRequests() async {
+    try {
+      final cached = await LocalCacheService.getCachedWantedRequests();
+      if (cached != null && cached.isNotEmpty && _wantedRequests.isEmpty && mounted) {
+        setState(() {
+          _wantedRequests = cached.map((c) => WantedRequest.fromJson(c)).toList();
+        });
+      }
+      final items = await ApiService.instance.fetchWantedRequests(
+        branch: _selectedBranch != 'All Branches' ? _selectedBranch : null,
+        academicYear: _selectedYear != 'All Years' ? _selectedYear : null,
+      );
+      if (!mounted) return;
+      setState(() => _wantedRequests = items);
+      await LocalCacheService.cacheWantedRequests(items.map((i) => i.toJson()).toList());
+    } catch (_) {}
+  }
+
+  Future<void> _checkIncomingCall() async {
+    final auth = context.read<AuthProvider>();
+    if (!auth.isLoggedIn || !mounted) return;
+    try {
+      final call = await ApiService.instance.fetchIncomingCall(token: auth.token);
+      if (call != null &&
+          call.status == 'ringing' &&
+          call.id != _lastHandledCallId &&
+          mounted) {
+        _lastHandledCallId = call.id;
+        await IncomingCallOverlay.show(context, call: call, token: auth.token);
+      }
+    } catch (_) {}
   }
 
   /// Starts the 3s warmup countdown for a cold feed request.
@@ -172,7 +235,7 @@ class _FeedScreenState extends State<FeedScreen> {
     final auth = context.watch<AuthProvider>();
     final collegeName = auth.profile?.collegeName ?? '';
     final label = _myCollegeOnly && collegeName.isNotEmpty
-        ? (auth.profile?.collegeBadge ?? 'My College')
+        ? Product.formatShortCollegeBadge(collegeName, auth.profile?.collegeCode)
         : 'My College';
     return ChoiceChip(
       avatar: Icon(
@@ -584,6 +647,20 @@ class _FeedScreenState extends State<FeedScreen> {
             ),
           ],
           _buildFilterRow(categories),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: _chromeVisible
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _buildAcademicFilterRow(),
+                      _buildWantedBoardRail(),
+                    ],
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
           Expanded(
             child: NotificationListener<ScrollNotification>(
               onNotification: _handleScrollNotification,
@@ -699,6 +776,837 @@ class _FeedScreenState extends State<FeedScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Horizontal academic department and year filter row.
+  Widget _buildAcademicFilterRow() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final year in _yearOptions) ...[
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(year),
+                  selected: _selectedYear == year,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (val) {
+                    setState(() => _selectedYear = val ? year : 'All Years');
+                    context.read<ProductProvider>().loadProducts(
+                          branch: _selectedBranch == 'All Branches'
+                              ? ''
+                              : _selectedBranch,
+                          academicYear: _selectedYear == 'All Years'
+                              ? ''
+                              : _selectedYear,
+                        );
+                    _fetchWantedRequests();
+                  },
+                  selectedColor: AppColors.royalBlue,
+                  backgroundColor: AppColors.surface,
+                  side: BorderSide(
+                    color: _selectedYear == year
+                        ? AppColors.royalBlue
+                        : AppColors.hairline,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  labelStyle: TextStyle(
+                    color: _selectedYear == year
+                        ? Colors.white
+                        : AppColors.textPrimary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(width: 4),
+            Container(width: 1, height: 20, color: AppColors.hairline),
+            const SizedBox(width: 8),
+            for (final branch in _branchOptions) ...[
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(branch),
+                  selected: _selectedBranch == branch,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (val) {
+                    setState(() => _selectedBranch = val ? branch : 'All Branches');
+                    context.read<ProductProvider>().loadProducts(
+                          branch: _selectedBranch == 'All Branches'
+                              ? ''
+                              : _selectedBranch,
+                          academicYear: _selectedYear == 'All Years'
+                              ? ''
+                              : _selectedYear,
+                        );
+                    _fetchWantedRequests();
+                  },
+                  selectedColor: AppColors.forestGreen,
+                  backgroundColor: AppColors.surface,
+                  side: BorderSide(
+                    color: _selectedBranch == branch
+                        ? AppColors.forestGreen
+                        : AppColors.hairline,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  labelStyle: TextStyle(
+                    color: _selectedBranch == branch
+                        ? Colors.white
+                        : AppColors.textPrimary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Campus Wanted (WTB) request board rail.
+  Widget _buildWantedBoardRail() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: AppColors.royalBlue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Icon(
+                      Icons.campaign_rounded,
+                      size: 16,
+                      color: AppColors.royalBlue,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Campus Wanted Board (WTB)',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.inkBlack,
+                    ),
+                  ),
+                  if (_wantedRequests.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1.5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.royalBlue,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        '${_wantedRequests.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              InkWell(
+                onTap: _openPostWantedSheet,
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.inkBlack,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.add, size: 13, color: Colors.white),
+                      SizedBox(width: 3),
+                      Text(
+                        'Request Item',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_wantedRequests.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 76,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _wantedRequests.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (context, index) {
+                  final req = _wantedRequests[index];
+                  return _buildWantedCard(req);
+                },
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 6),
+            const Text(
+              'Looking for books, instruments or drafters? Post what you need to alert peers!',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: AppColors.textMuted,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWantedCard(WantedRequest req) {
+    return InkWell(
+      onTap: () => _openWantedDetailSheet(req),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 220,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceHigh,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.hairline),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              req.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: AppColors.inkBlack,
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                if (req.maxBudget != null)
+                  Text(
+                    'Budget: ${formatInr(req.maxBudget!)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.forestGreen,
+                    ),
+                  )
+                else
+                  const Text(
+                    'Flexible Budget',
+                    style: TextStyle(fontSize: 10, color: AppColors.textMuted),
+                  ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1.5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.royalBlue.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    req.branch != null && req.branch != 'All Branches'
+                        ? req.branch!
+                        : (req.category ?? 'Item'),
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.royalBlue,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            Text(
+              'By ${req.requesterName} · Tap to view',
+              style: const TextStyle(
+                fontSize: 10,
+                color: AppColors.textMuted,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openWantedDetailSheet(WantedRequest req) {
+    final auth = context.read<AuthProvider>();
+    final isOwner = auth.profile?.id == req.userId;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: AppColors.hairline,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  req.title,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.inkBlack,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Text(
+                      req.maxBudget != null
+                          ? 'Budget: ${formatInr(req.maxBudget!)}'
+                          : 'Flexible Budget',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.forestGreen,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.royalBlue.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        '${req.branch ?? "Any Branch"} · ${req.academicYear ?? "Any Year"}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.royalBlue,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                if (req.description.isNotEmpty) ...[
+                  Text(
+                    req.description,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AppColors.textPrimary,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                Text(
+                  'Requested by ${req.requesterName} (${req.collegeName ?? "Campus Network"})',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (isOwner) ...[
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.danger,
+                      side: const BorderSide(color: AppColors.danger),
+                    ),
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: const Text('Remove Request'),
+                    onPressed: () async {
+                      try {
+                        await ApiService.instance.deleteWantedRequest(
+                          req.id,
+                          token: auth.token,
+                        );
+                        if (sheetContext.mounted) {
+                          Navigator.of(sheetContext).pop();
+                        }
+                        _fetchWantedRequests();
+                      } catch (_) {}
+                    },
+                  ),
+                ] else ...[
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.inkBlack,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    icon: const Icon(Icons.mail_outline, size: 18),
+                    label: const Text(
+                      'Contact Student via Email',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    onPressed: () {
+                      Navigator.of(sheetContext).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Contact email: ${req.requesterEmail}'),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openPostWantedSheet() async {
+    final auth = context.read<AuthProvider>();
+    if (!auth.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please sign in to post a wanted request.'),
+        ),
+      );
+      return;
+    }
+
+    final titleCtrl = TextEditingController();
+    final budgetCtrl = TextEditingController();
+    final descCtrl = TextEditingController();
+    final aiPromptCtrl = TextEditingController();
+    String category = 'Academic Material';
+    String branch = _selectedBranch != 'All Branches'
+        ? _selectedBranch
+        : (auth.profile?.branch ?? 'Computer / IT');
+    String year = _selectedYear != 'All Years'
+        ? _selectedYear
+        : (auth.profile?.academicYear ?? 'FE');
+    bool isDrafting = false;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+                top: 20,
+                left: 20,
+                right: 20,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: AppColors.hairline,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Campus Wanted Board (WTB)',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.inkBlack,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Alert classmates and peers what you need to buy.',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: AppColors.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // AI Quick-Draft Bar
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceHigh,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.hairline),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(
+                                Icons.auto_awesome,
+                                size: 14,
+                                color: AppColors.royalBlue,
+                              ),
+                              SizedBox(width: 6),
+                              Text(
+                                'AI Quick-Draft',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.royalBlue,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: aiPromptCtrl,
+                                  style: const TextStyle(fontSize: 12.5),
+                                  decoration: const InputDecoration(
+                                    hintText:
+                                        'e.g. Need Casio 991EX calculator under 600 urgent',
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    border: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    filled: false,
+                                  ),
+                                ),
+                              ),
+                              if (isDrafting)
+                                const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              else
+                                ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.royalBlue,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: () async {
+                                    final prompt = aiPromptCtrl.text.trim();
+                                    if (prompt.isEmpty) return;
+                                    setSheetState(() => isDrafting = true);
+                                    try {
+                                      final draft = await ApiService.instance
+                                          .draftWantedWithAi(
+                                        prompt,
+                                        token: auth.token,
+                                      );
+                                      setSheetState(() {
+                                        if (draft['title'] != null) {
+                                          titleCtrl.text =
+                                              draft['title'].toString();
+                                        }
+                                        if (draft['description'] != null) {
+                                          descCtrl.text =
+                                              draft['description'].toString();
+                                        }
+                                        if (draft['max_budget'] != null) {
+                                          budgetCtrl.text =
+                                              draft['max_budget'].toString();
+                                        }
+                                        if (draft['category'] != null) {
+                                          category =
+                                              draft['category'].toString();
+                                        }
+                                        if (draft['branch'] != null) {
+                                          branch = draft['branch'].toString();
+                                        }
+                                        if (draft['academic_year'] != null) {
+                                          year = draft['academic_year']
+                                              .toString();
+                                        }
+                                      });
+                                    } catch (_) {
+                                    } finally {
+                                      setSheetState(() => isDrafting = false);
+                                    }
+                                  },
+                                  child: const Text(
+                                    'Draft',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Title
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Item You Need *',
+                        hintText: 'e.g. Casio fx-991EX Scientific Calculator',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Target Budget
+                    TextField(
+                      controller: budgetCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Max Target Budget (₹) *',
+                        prefixText: '₹ ',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Category dropdown
+                    DropdownButtonFormField<String>(
+                      value: category,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: [
+                        'Academic Material',
+                        'Electronics',
+                        'Lab Gear & Instruments',
+                        'Other'
+                      ]
+                          .map(
+                            (c) => DropdownMenuItem(
+                              value: c,
+                              child: Text(
+                                c,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (val) {
+                        if (val != null) setSheetState(() => category = val);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Branch & Year row
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: branch,
+                            decoration:
+                                const InputDecoration(labelText: 'Department'),
+                            isExpanded: true,
+                            items: _branchOptions
+                                .map(
+                                  (b) => DropdownMenuItem(
+                                    value: b,
+                                    child: Text(
+                                      b,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (val) {
+                              if (val != null) setSheetState(() => branch = val);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: year,
+                            decoration:
+                                const InputDecoration(labelText: 'Year'),
+                            items: _yearOptions
+                                .map(
+                                  (y) => DropdownMenuItem(
+                                    value: y,
+                                    child: Text(
+                                      y,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (val) {
+                              if (val != null) setSheetState(() => year = val);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Notes / Description
+                    TextField(
+                      controller: descCtrl,
+                      maxLines: 2,
+                      decoration: const InputDecoration(
+                        labelText: 'Details / Condition Preferred',
+                        hintText:
+                            'e.g. Working condition, with cover preferred',
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.inkBlack,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () async {
+                        final title = titleCtrl.text.trim();
+                        final budget = double.tryParse(budgetCtrl.text.trim());
+                        if (title.isEmpty || budget == null || budget <= 0) {
+                          ScaffoldMessenger.of(sheetContext).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Please enter an item name and valid target budget.',
+                              ),
+                            ),
+                          );
+                          return;
+                        }
+
+                        final messenger = ScaffoldMessenger.of(context);
+                        try {
+                          await ApiService.instance.createWantedRequest({
+                            'title': title,
+                            'description': descCtrl.text.trim().isEmpty
+                                ? 'Wanted item: $title'
+                                : descCtrl.text.trim(),
+                            'max_budget': budget,
+                            'category': category,
+                            'branch': branch,
+                            'academic_year': year,
+                            'urgency': 'Medium',
+                            'college_name': auth.profile?.collegeName,
+                            'college_code': auth.profile?.collegeCode,
+                          }, token: auth.token);
+
+                          if (sheetContext.mounted) {
+                            Navigator.of(sheetContext).pop();
+                          }
+                          _fetchWantedRequests();
+                          if (mounted) {
+                            messenger.showSnackBar(
+                              const SnackBar(
+                                backgroundColor: AppColors.forestGreen,
+                                content: Text(
+                                  '🎉 Wanted request broadcasted! Campus peers notified.',
+                                ),
+                              ),
+                            );
+                          }
+                        } catch (e) {
+                          if (sheetContext.mounted) {
+                            ScaffoldMessenger.of(sheetContext).showSnackBar(
+                              SnackBar(
+                                content: Text('Failed to post request: $e'),
+                              ),
+                            );
+                          }
+                        }
+                      },
+                      child: const Text(
+                        'Broadcast Wanted Request',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 

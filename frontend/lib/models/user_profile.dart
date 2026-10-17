@@ -12,6 +12,8 @@ class UserProfile {
     this.status = 'active',
     this.collegeName,
     this.collegeCode,
+    this.branch,
+    this.academicYear,
   });
 
   /// Builds a [UserProfile] from the snake_case JSON produced by FastAPI.
@@ -25,6 +27,8 @@ class UserProfile {
       status: json['status']?.toString() ?? 'active',
       collegeName: json['college_name']?.toString(),
       collegeCode: json['college_code']?.toString(),
+      branch: json['branch']?.toString(),
+      academicYear: json['academic_year']?.toString(),
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
           DateTime.now(),
     );
@@ -49,6 +53,12 @@ class UserProfile {
   /// DTE/CET institute code of [collegeName] (e.g. '6006').
   final String? collegeCode;
 
+  /// Engineering department/branch (e.g. 'Computer / IT').
+  final String? branch;
+
+  /// Current academic year (e.g. 'SE (2nd Year)' or 'FE').
+  final String? academicYear;
+
   /// Short display label for the college chip ("COEP" style).
   String? get collegeBadge {
     final name = collegeName?.trim() ?? '';
@@ -68,6 +78,8 @@ class UserProfile {
         'status': status,
         'college_name': collegeName,
         'college_code': collegeCode,
+        'branch': branch,
+        'academic_year': academicYear,
         'created_at': createdAt.toIso8601String(),
       };
 
