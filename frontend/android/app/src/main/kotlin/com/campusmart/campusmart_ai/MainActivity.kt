@@ -200,7 +200,7 @@ class MainActivity : FlutterActivity() {
                 val devices = audioManager.availableCommunicationDevices
                 val targetType = if (enableSpeaker) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
                 val targetDevice = devices.find { it.type == targetType }
-                    ?: if (enableSpeaker) devices.find { it.type == AudioDeviceInfo.TYPE_SPEAKER } else null
+                    ?: if (enableSpeaker) devices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } else null
                 if (targetDevice != null) {
                     audioManager.setCommunicationDevice(targetDevice)
                 }
